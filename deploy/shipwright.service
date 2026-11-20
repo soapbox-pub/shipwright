@@ -1,0 +1,25 @@
+[Unit]
+Description=Shipwright, the Armada community's coding agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shipwright
+Group=shipwright
+WorkingDirectory=/opt/shipwright/app
+EnvironmentFile=/etc/shipwright/env
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/shipwright
+Environment=PATH=/opt/shipwright/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node src/main.ts
+Restart=always
+RestartSec=10
+# Workers are separate processes under sudo; stopping the service stops them.
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

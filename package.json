@@ -1,0 +1,28 @@
+{
+  "name": "shipwright",
+  "version": "1.0.0",
+  "description": "An AI agent for the Armada community: it turns bug reports and feature requests into ngit pull requests with previews and screenshots",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "check": "tsc",
+    "start": "node src/main.ts"
+  },
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.329",
+    "nostr-tools": "^2.26.1",
+    "ws": "^8.23.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "private": "true"
+}

@@ -1,0 +1,583 @@
+#!/usr/bin/env bash
+
+# Canonical ngit standalone bootstrap installer.
+#
+# The ngit-dev-website deployment renders the two placeholders below from one
+# exact, validated NIP-82 main-channel release. This script intentionally does
+# not discover "latest" or execute unpinned downloads at runtime.
+
+set -eu
+
+VERSION='3.2.0'
+ASSET_MANIFEST=$(cat <<'NGIT_ASSET_MANIFEST'
+linux-x86_64-gnu|https://relay.ngit.dev/c9cc59b2c5f6812c468a24e52d56f034d321461df90e88e0baca9b3831b817fe|c9cc59b2c5f6812c468a24e52d56f034d321461df90e88e0baca9b3831b817fe|ngit-v3.2.0-x86_64-unknown-linux-gnu.2.17.tar.gz|application/gzip
+linux-x86_64-musl|https://relay.ngit.dev/20955b31e01612bae5bbfc68ec9a95fc4d7138228564179cf328783ae409b332|20955b31e01612bae5bbfc68ec9a95fc4d7138228564179cf328783ae409b332|ngit-v3.2.0-x86_64-unknown-linux-musl.tar.gz|application/gzip
+linux-aarch64-gnu|https://relay.ngit.dev/ee7910fbb0b08cf9a033ef10ed955b810f6f53f75a7a596ce64aa9bf5b28bed6|ee7910fbb0b08cf9a033ef10ed955b810f6f53f75a7a596ce64aa9bf5b28bed6|ngit-v3.2.0-aarch64-unknown-linux-gnu.2.17.tar.gz|application/gzip
+darwin-universal|https://relay.ngit.dev/4dd6c8488ed79632870a2378da4f81526f5a842f8d5cc9c97f683edf7d12c8e5|4dd6c8488ed79632870a2378da4f81526f5a842f8d5cc9c97f683edf7d12c8e5|ngit-v3.2.0-universal-apple-darwin.tar.gz|application/gzip
+windows-x86_64|https://relay.ngit.dev/f1c617f8183958cf3d7e7c807a90e38c7c9c957a79da785636875d04802b5b4d|f1c617f8183958cf3d7e7c807a90e38c7c9c957a79da785636875d04802b5b4d|ngit-v3.2.0-x86_64-pc-windows-msvc.zip|application/zip
+NGIT_ASSET_MANIFEST
+)
+
+RECEIPT_FILENAME='.ngit-install-receipt.json'
+BINARIES='ngit git-remote-nostr'
+FORCE_STANDALONE=0
+INSTALL_METHOD=auto
+INSTALL_DIR=''
+ALLOW_DOWNGRADE=0
+REPAIR=0
+ngit_stage=''
+ngit_lock=''
+ngit_committed=0
+
+info() {
+    printf '[INFO] %s\n' "$1"
+}
+
+warn() {
+    printf '[WARN] %s\n' "$1" >&2
+}
+
+fail() {
+    printf '[ERROR] %s\n' "$1" >&2
+    exit 1
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+is_nixos() {
+    if [ -e /etc/NIXOS ]; then
+        return 0
+    fi
+    [ -r /etc/os-release ] && grep -qE '^ID=("?nixos"?)$' /etc/os-release
+}
+
+parse_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --standalone) FORCE_STANDALONE=1; INSTALL_METHOD=standalone ;;
+            --method)
+                [ "$#" -ge 2 ] || fail '--method requires cargo or standalone'
+                shift
+                case "$1" in cargo|standalone) INSTALL_METHOD=$1 ;; *) fail '--method requires cargo or standalone' ;; esac
+                ;;
+            --install-dir)
+                [ "$#" -ge 2 ] || fail '--install-dir requires an absolute directory'
+                shift
+                case "$1" in /*) INSTALL_DIR=$1 ;; *) fail '--install-dir requires an absolute directory' ;; esac
+                ;;
+            --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+            --repair) REPAIR=1 ;;
+            -h|--help)
+                printf '%s\n' 'usage: install.sh [--method cargo|standalone] [--install-dir DIR] [--repair] [--allow-downgrade] [--standalone]'
+                printf '%s\n' '  --method cargo       upgrade the existing Cargo installation through Cargo'
+                printf '%s\n' '  --method standalone  install a separate standalone copy when another tool owns ngit'
+                printf '%s\n' '  --install-dir DIR    choose the standalone directory (absolute path)'
+                printf '%s\n' '  --repair             replace an invalid receipt in the selected directory'
+                printf '%s\n' '  --allow-downgrade    permit replacing a newer or unrecognized version'
+                printf '%s\n' '  --standalone  use the static musl archive on x86_64 NixOS instead of Nix'
+                exit 0
+                ;;
+            *) fail "unknown installer option: $1" ;;
+        esac
+        shift
+    done
+}
+
+nixos_install_guidance() {
+    warn 'NixOS detected; prefer a Nix-managed installation of the latest stable release:'
+    printf "  nix profile add 'git+https://ngit.dev/ngit.git?ref=stable'\n" >&2
+    warn 'For a user-owned static installation instead, rerun with:'
+    printf '  curl -fsSL https://ngit.dev/install.sh | bash -s -- --standalone\n' >&2
+}
+
+detect_target() {
+    ngit_os=$(uname -s)
+    ngit_arch=$(uname -m)
+    case "$ngit_os:$ngit_arch" in
+        Linux:x86_64|Linux:amd64)
+            if is_nixos || ldd --version 2>&1 | grep -qi musl; then
+                printf '%s\n' 'linux-x86_64-musl'
+            else
+                printf '%s\n' 'linux-x86_64-gnu'
+            fi
+            ;;
+        Linux:aarch64|Linux:arm64)
+            is_nixos && return 1
+            printf '%s\n' 'linux-aarch64-gnu'
+            ;;
+        Darwin:x86_64|Darwin:arm64|Darwin:aarch64) printf '%s\n' 'darwin-universal' ;;
+        *) return 1 ;;
+    esac
+}
+
+select_asset() {
+    ngit_target=$1
+    printf '%s\n' "$ASSET_MANIFEST" | awk -F '|' -v target="$ngit_target" '
+        $1 == target && NF == 5 { print; found += 1 }
+        END { if (found != 1) exit 1 }
+    '
+}
+
+download() {
+    ngit_url=$1
+    ngit_destination=$2
+    if command_exists curl; then
+        curl --fail --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 300 --output "$ngit_destination" "$ngit_url"
+    elif command_exists wget; then
+        wget --https-only --timeout=30 --tries=1 --output-document "$ngit_destination" "$ngit_url"
+    else
+        fail 'curl or wget is required'
+    fi
+}
+
+# Every source serves the same signed bytes. Never extract an unchecked copy.
+download_verified() {
+    ngit_primary=$1
+    ngit_archive_path=$2
+    ngit_seen=' '
+    for ngit_candidate in "$ngit_primary" \
+        "https://relay.ngit.dev/$ngit_expected_sha" \
+        "https://blossom.primal.net/$ngit_expected_sha" \
+        "https://blossom.ditto.pub/$ngit_expected_sha" \
+        "https://haven.danconwaydev.com/$ngit_expected_sha" \
+        "https://github.com/DanConwayDev/ngit-cli/releases/download/v$VERSION/$ngit_filename"; do
+        case "$ngit_seen" in *" $ngit_candidate "*) continue ;; esac
+        ngit_seen="$ngit_seen$ngit_candidate "
+        rm -f "$ngit_archive_path"
+        if download "$ngit_candidate" "$ngit_archive_path"; then
+            ngit_actual_sha=$(sha256 "$ngit_archive_path")
+            if [ "$ngit_actual_sha" = "$ngit_expected_sha" ]; then return 0; fi
+            info "SHA-256 mismatch from $ngit_candidate; trying the next mirror"
+        fi
+    done
+    rm -f "$ngit_archive_path"
+    fail 'no download source supplied the signed release bytes'
+}
+
+sha256() {
+    if command_exists sha256sum; then
+        sha256sum "$1" | awk '{ print $1 }'
+    elif command_exists shasum; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    else
+        fail 'sha256sum or shasum is required to verify the release asset'
+    fi
+}
+
+# Resolve executable and directory symlinks without GNU-only readlink flags.
+canonical_path() {
+    ngit_path=$1
+    ngit_links=0
+    while :; do
+        ngit_parent=$(cd -P "$(dirname "$ngit_path")" && pwd) || return 1
+        ngit_path="$ngit_parent/$(basename "$ngit_path")"
+        [ -L "$ngit_path" ] || break
+        ngit_links=$((ngit_links + 1))
+        [ "$ngit_links" -le 40 ] || return 1
+        ngit_link=$(readlink "$ngit_path") || return 1
+        case "$ngit_link" in /*) ngit_path=$ngit_link ;; *) ngit_path="$ngit_parent/$ngit_link" ;; esac
+    done
+    printf '%s\n' "$ngit_path"
+}
+
+valid_receipt() {
+    # Accept the installer's schema, regardless of whitespace or field order.
+    # Unknown schema/fields require explicit repair rather than implicit adoption.
+    [ -f "$1/$RECEIPT_FILENAME" ] && awk '
+        { text = text $0 }
+        END {
+            compact = ""
+            quoted = 0
+            for (i = 1; i <= length(text); i++) {
+                char = substr(text, i, 1)
+                if (char == "\"") quoted = !quoted
+                if (quoted || char !~ /[[:space:]]/) compact = compact char
+            }
+            text = compact
+            if (text !~ /^\{.*\}$/) exit 1
+            text = substr(text, 2, length(text) - 2)
+            count = split(text, fields, ",")
+            for (i = 1; i <= count; i++) {
+                if (fields[i] == "\"schema\":1") schema++
+                else if (fields[i] == "\"method\":\"standalone\"") method++
+                else if (fields[i] ~ /^"version":"[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?"$/) version++
+                else exit 1
+            }
+            exit !(schema == 1 && method == 1 && version == 1)
+        }
+    ' "$1/$RECEIPT_FILENAME"
+}
+
+# Bound Git lookup even when git on PATH is a broken wrapper.
+probe_output() {
+    local output child watchdog status
+    output=$(mktemp) || return 1
+    "$@" >"$output" &
+    child=$!
+    (sleep 5; kill -KILL "$child" 2>/dev/null) >/dev/null 2>&1 &
+    watchdog=$!
+    status=0
+    wait "$child" || status=$?
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    if [ "$status" -eq 0 ]; then cat "$output"; fi
+    rm -f "$output"
+    return "$status"
+}
+
+# Query Git's helper search path, not just the interactive shell's PATH.
+inspect_git_helper() {
+    # Git may change to the repository root before launching its helper.
+    # Relative PATH entries cannot be verified against a future Git invocation.
+    local entry remaining
+    remaining=$PATH
+    while :; do
+        entry=${remaining%%:*}
+        case "$entry" in /*) ;; *) warn 'Cannot verify Git helper: PATH contains relative or empty entries'; return 1 ;; esac
+        case "$remaining" in *:*) remaining=${remaining#*:} ;; *) break ;; esac
+    done
+    ngit_helper=''
+    ngit_git_path=$PATH
+    if command_exists git; then
+        ngit_exec_path=$(probe_output git --exec-path) || { warn 'Cannot verify Git helper: Git exec-path lookup failed'; return 1; }
+        [ -n "$ngit_exec_path" ] || { warn 'Cannot verify Git helper: Git returned an empty exec-path'; return 1; }
+        case "$ngit_exec_path" in /*) ;; *) ngit_exec_path="$(pwd -P)/$ngit_exec_path" ;; esac
+        ngit_git_path="$ngit_exec_path:$PATH"
+    else
+        warn 'Git is not installed; helper selection cannot be verified until Git is installed.'
+        return 1
+    fi
+    ngit_helper=$(PATH="$ngit_git_path" command -v git-remote-nostr || true)
+    ngit_helper_path=$ngit_helper
+    if [ -n "$ngit_helper" ]; then
+        ngit_helper=$(canonical_path "$ngit_helper") || { warn 'Cannot resolve Git helper'; return 1; }
+    fi
+}
+
+check_existing_pair() {
+    ngit_obsolete=
+    inspect_git_helper || return 0
+    [ -n "$ngit_helper" ] || return 0
+    if [ -z "$ngit_existing_dir" ] || {
+        [ "$ngit_helper" != "$ngit_existing_dir/git-remote-nostr" ] &&
+        [ ! "$ngit_helper" -ef "$ngit_existing_dir/git-remote-nostr" ];
+    }; then
+        ngit_other=$(dirname "$ngit_helper")
+        if [ -n "$ngit_existing_dir" ] && standalone_pair "$ngit_existing_dir" &&
+            [ ! -L "$ngit_helper_path" ] && standalone_pair "$ngit_other" &&
+            { [ -z "$INSTALL_DIR" ] || [ "$INSTALL_DIR" = "$ngit_existing_dir" ]; }; then
+            check_downgrade "$ngit_other/ngit"
+            ngit_obsolete=$ngit_other
+            info "Will consolidate standalone $ngit_other into $ngit_existing_dir after verifying the update"
+            return 0
+        fi
+        warn "Git selects $ngit_helper; active ngit: ${ngit_existing:-not found}"
+        warn 'Update or uninstall the conflicting copy through its owner (Cargo, Nix, or your package manager). Git exec-path takes precedence over PATH.'
+        [ "$INSTALL_METHOD" = standalone ] || fail 'conflicting installation; no files changed. To deliberately install a separate copy, use --method standalone and resolve the conflict before using Git.'
+    fi
+}
+
+# Only complete regular-file pairs with matching receipts can be retired.
+standalone_pair() {
+    local directory=$1 name old_version
+    case "$directory/" in /nix/store/*) return 1 ;; esac
+    [ ! -e "$(dirname "$directory")/.crates.toml" ] && [ ! -e "$(dirname "$directory")/.crates2.json" ] || return 1
+    valid_receipt "$directory" || return 1
+    for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+        [ -f "$directory/$name" ] && [ ! -L "$directory/$name" ] || return 1
+    done
+    old_version=$(awk -F '"' '{ for(i=1;i<=NF;i++) if($i=="version") {print $(i+2); exit} }' "$directory/$RECEIPT_FILENAME")
+    [ "$(probe_output "$directory/ngit" --version)" = "ngit $old_version" ] &&
+        [ "$(probe_output "$directory/git-remote-nostr" --version)" = "v$old_version" ]
+}
+
+consolidate_standalone() (
+    [ -n "${ngit_obsolete:-}" ] || exit 0
+    [ "$ngit_dir" = "$ngit_existing_dir" ] || fail 'consolidation must retain the active standalone directory; omit --install-dir'
+    standalone_pair "$ngit_dir" || fail 'retained standalone pair failed verification; old installation preserved'
+    [ "$(probe_output "$ngit_dir/ngit" --version)" = "ngit $VERSION" ] || fail 'retained version differs from requested release'
+    mkdir "$ngit_obsolete/.ngit-install-lock" 2>/dev/null || fail "Cannot consolidate $ngit_obsolete: check permissions or an active installer; old files preserved"
+    local backup='' committed=0 recovery_failed=0 name selected active
+    # Invoked by the EXIT trap.
+    # shellcheck disable=SC2329
+    restore_retired() {
+        if [ -n "$backup" ] && [ "$committed" -eq 0 ]; then
+            for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+                if [ -e "$backup/$name" ]; then
+                    mv "$backup/$name" "$ngit_obsolete/$name" || { recovery_failed=1; warn "Restore $backup/$name manually"; }
+                fi
+            done
+        fi
+        if [ -n "$backup" ]; then rmdir "$backup" 2>/dev/null || warn "Recovery files remain in $backup"; fi
+        if [ "$recovery_failed" -eq 0 ]; then rmdir "$ngit_obsolete/.ngit-install-lock" 2>/dev/null || true; fi
+    }
+    trap restore_retired EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    standalone_pair "$ngit_obsolete" || fail 'obsolete receipt or binaries changed; old files preserved'
+    check_downgrade "$ngit_obsolete/ngit"
+    backup=$(mktemp -d "$ngit_obsolete/.ngit-retired.XXXXXX") || fail 'cannot stage obsolete installation'
+    for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+        mv "$ngit_obsolete/$name" "$backup/$name" || fail 'cannot retire old installation; restoring its files'
+    done
+    selected=$(inspect_git_helper && printf '%s' "$ngit_helper") || fail 'cannot verify Git selection; restoring old installation'
+    active=$(canonical_path "$(command -v ngit)") || fail 'cannot verify active ngit; restoring old installation'
+    [ "$selected" -ef "$ngit_dir/git-remote-nostr" ] && [ "$active" -ef "$ngit_dir/ngit" ] || fail 'another installation still takes precedence; restoring old installation'
+    committed=1
+    rm "$backup/ngit" "$backup/git-remote-nostr" "$backup/$RECEIPT_FILENAME" || fail "Consolidated successfully; remove remaining retired files in $backup manually"
+    info "Removed obsolete standalone files from $ngit_obsolete; Git selects $ngit_dir"
+)
+
+inspect_existing_install() {
+    ngit_existing=''
+    ngit_existing_dir=''
+    ngit_cargo_root=''
+    if command_exists ngit; then
+        ngit_existing=$(canonical_path "$(command -v ngit)") || fail 'cannot resolve the existing ngit executable'
+        ngit_existing_dir=$(dirname "$ngit_existing")
+        case "$ngit_existing" in /nix/store/*) return 0 ;; esac
+        ngit_root=$(dirname "$ngit_existing_dir")
+        if [ "$(basename "$ngit_existing_dir")" = bin ] && {
+            [ -f "$ngit_root/.crates.toml" ] || [ -f "$ngit_root/.crates2.json" ] ||
+            [ "$ngit_existing_dir" = "${CARGO_HOME:-$HOME/.cargo}/bin" ]; }; then
+            ngit_cargo_root=$ngit_root
+        fi
+    fi
+}
+
+find_install_dir() {
+    if [ -n "$INSTALL_DIR" ]; then
+        printf '%s\n' "$INSTALL_DIR"
+    elif [ -n "$ngit_existing_dir" ] && { valid_receipt "$ngit_existing_dir" || { [ "$REPAIR" -eq 1 ] && [ -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; }; }; then
+        printf '%s\n' "$ngit_existing_dir"
+    else
+        # Never fall back into a package manager's directory.
+        printf '%s\n' "$HOME/.local/bin"
+    fi
+}
+
+check_destination() {
+    case "$ngit_dir/" in /nix/store/*) fail 'Nix store installations must be updated through Nix' ;; esac
+    if [ -e "$ngit_dir/$RECEIPT_FILENAME" ] || [ -L "$ngit_dir/$RECEIPT_FILENAME" ]; then
+        if ! valid_receipt "$ngit_dir"; then
+            [ "$REPAIR" -eq 1 ] || fail 'invalid installer receipt; use --repair --install-dir DIR to repair this standalone installation'
+        fi
+    else
+        for ngit_binary in $BINARIES; do
+            if [ -e "$ngit_dir/$ngit_binary" ] || [ -L "$ngit_dir/$ngit_binary" ]; then
+                fail "refusing to overwrite $ngit_dir/$ngit_binary without an installer receipt; choose a separate --install-dir"
+            fi
+        done
+    fi
+    for ngit_binary in $BINARIES "$RECEIPT_FILENAME"; do
+        [ ! -d "$ngit_dir/$ngit_binary" ] || fail "destination is a directory: $ngit_dir/$ngit_binary"
+    done
+}
+
+check_downgrade() {
+    [ "$ALLOW_DOWNGRADE" -eq 1 ] && return 0
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    ngit_reported=$(probe_output "$1" --version 2>/dev/null) || fail 'cannot read the installed version; use --allow-downgrade to authorize replacement'
+    # The download is stable. A prerelease of the same core version is older.
+    if ! printf '%s\n' "$ngit_reported" | awk -v target="$VERSION" '
+        /^ngit [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$/ {
+            split($2, old, "."); split(target, new, ".")
+            for (i = 1; i <= 3; i++) {
+                if (old[i] + 0 < new[i] + 0) { safe = 1; exit }
+                if (old[i] + 0 > new[i] + 0) exit
+            }
+            safe = 1
+        }
+        END { exit !safe }
+    '; then
+        fail "installed version '$ngit_reported' is newer than v$VERSION or unrecognized; use --allow-downgrade to authorize replacement"
+    fi
+}
+
+report_path() {
+    hash -r
+    # A failed diagnostic after replacement must not turn a successful update
+    # into an apparent installation failure.
+    if ! ngit_helper=$(inspect_git_helper && printf '%s' "$ngit_helper"); then
+        warn 'Installation completed, but Git helper selection could not be verified.'
+        return 0
+    fi
+    for ngit_binary in $BINARIES; do
+        ngit_active=$(command -v "$ngit_binary" || true)
+        if [ "$ngit_binary" = git-remote-nostr ]; then ngit_active=$ngit_helper; fi
+        ngit_resolved=''
+        if [ -n "$ngit_active" ]; then
+            ngit_resolved=$(canonical_path "$ngit_active" || true)
+        fi
+        if [ "$ngit_resolved" != "$ngit_dir/$ngit_binary" ] && [ ! "$ngit_resolved" -ef "$ngit_dir/$ngit_binary" ]; then
+            warn "$ngit_binary selected: ${ngit_active:-not found}; installed copy: $ngit_dir/$ngit_binary"
+            if [ "$ngit_binary" = git-remote-nostr ]; then
+                warn 'If this helper is in Git exec-path, changing PATH is insufficient: update or uninstall that copy through its owner.'
+            fi
+            # Keep $PATH literal for the command the user will run.
+            # shellcheck disable=SC2016
+            printf 'Run in your shell: export PATH=%q:"$PATH"; hash -r\n' "$ngit_dir" >&2
+            warn 'Add the same PATH setting to your shell startup file to keep using this installation.'
+        fi
+    done
+}
+
+# Backups remain on the destination filesystem. Mark each replacement before
+# moving it so EXIT/signal cleanup can restore the whole pair and receipt.
+cleanup() {
+    ngit_status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$ngit_stage" ] && [ "$ngit_committed" -ne 1 ]; then
+        ngit_restored=1
+        for ngit_binary in $BINARIES "$RECEIPT_FILENAME"; do
+            if [ -f "$ngit_stage/replace-$ngit_binary" ]; then
+                if [ -e "$ngit_stage/old/$ngit_binary" ] || [ -L "$ngit_stage/old/$ngit_binary" ]; then
+                    mv -f "$ngit_stage/old/$ngit_binary" "$ngit_dir/$ngit_binary" || ngit_restored=0
+                else
+                    rm -f "$ngit_dir/$ngit_binary" || ngit_restored=0
+                fi
+            fi
+        done
+        if [ "$ngit_restored" -ne 1 ]; then
+            warn "Rollback incomplete; original files remain in $ngit_stage/old. Restore them before retrying."
+            ngit_stage=''
+            ngit_status=1
+        fi
+    fi
+    [ -z "$ngit_stage" ] || rm -rf "$ngit_stage"
+    [ -z "$ngit_lock" ] || rmdir "$ngit_lock"
+    [ -z "${ngit_temp:-}" ] || rm -rf "$ngit_temp"
+    exit "$ngit_status"
+}
+
+install_binaries() {
+    ngit_stage=$(mktemp -d "$ngit_dir/.ngit-install.XXXXXXXX")
+    mkdir "$ngit_stage/new" "$ngit_stage/old"
+    for ngit_binary in $BINARIES; do
+        ngit_sources=$(find "$ngit_extract" -type f -name "$ngit_binary" -print)
+        [ "$(printf '%s\n' "$ngit_sources" | awk 'NF { n++ } END { print n+0 }')" -eq 1 ] || fail "release archive must contain exactly one $ngit_binary"
+        cp "$ngit_sources" "$ngit_stage/new/$ngit_binary"
+        chmod 0755 "$ngit_stage/new/$ngit_binary"
+    done
+    ngit_reported=$("$ngit_stage/new/ngit" --version) || fail 'release ngit failed its version check'
+    [ "$ngit_reported" = "ngit $VERSION" ] || fail 'release ngit reported an unexpected version'
+    ngit_remote_reported=$("$ngit_stage/new/git-remote-nostr" --version) || fail 'release git-remote-nostr failed its version check'
+    [ "$ngit_remote_reported" = "v$VERSION" ] || fail 'release git-remote-nostr reported an unexpected version'
+    write_receipt "$ngit_stage/new"
+    for ngit_binary in $BINARIES "$RECEIPT_FILENAME"; do
+        if [ -e "$ngit_dir/$ngit_binary" ] || [ -L "$ngit_dir/$ngit_binary" ]; then
+            cp -Pp "$ngit_dir/$ngit_binary" "$ngit_stage/old/$ngit_binary"
+        fi
+    done
+    for ngit_binary in $BINARIES "$RECEIPT_FILENAME"; do
+        touch "$ngit_stage/replace-$ngit_binary"
+        mv -f "$ngit_stage/new/$ngit_binary" "$ngit_dir/$ngit_binary"
+    done
+    ngit_reported=$("$ngit_dir/ngit" --version) || fail 'installed ngit failed its version check'
+    [ "$ngit_reported" = "ngit $VERSION" ] || fail 'installed ngit reported an unexpected version'
+    ngit_remote_reported=$("$ngit_dir/git-remote-nostr" --version) || fail 'installed git-remote-nostr failed its version check'
+    [ "$ngit_remote_reported" = "v$VERSION" ] || fail 'installed git-remote-nostr reported an unexpected version'
+    ngit_committed=1
+}
+
+write_receipt() {
+    ngit_receipt_dir=$1
+    ngit_temporary="$ngit_receipt_dir/$RECEIPT_FILENAME.tmp.$$"
+    umask 022
+    printf '{\n  "schema": 1,\n  "method": "standalone",\n  "version": "%s"\n}\n' \
+        "$VERSION" >"$ngit_temporary"
+    mv "$ngit_temporary" "$ngit_receipt_dir/$RECEIPT_FILENAME"
+}
+
+main() {
+    parse_arguments "$@"
+    printf '%s\n' "$VERSION" | awk '/^[0-9]+\.[0-9]+\.[0-9]+$/ { valid=1 } END { exit !valid }' || fail 'installer template was not rendered with a stable release'
+    inspect_existing_install
+    check_existing_pair
+    if [ "$INSTALL_METHOD" = auto ] && [ "$REPAIR" -eq 1 ] && [ -n "$ngit_existing_dir" ] &&
+        [ ! -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+        fail '--repair requires an existing standalone receipt; update this installation through its original package manager'
+    fi
+    if [ "$INSTALL_METHOD" = auto ] && [ -n "$ngit_cargo_root" ] &&
+        [ ! -e "$ngit_existing_dir/$RECEIPT_FILENAME" ] && [ ! -L "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+        INSTALL_METHOD=cargo
+    fi
+    if [ "$INSTALL_METHOD" = cargo ]; then
+        [ -n "$ngit_cargo_root" ] || fail 'the active ngit is not a recognized Cargo installation'
+        [ -z "$INSTALL_DIR" ] && [ "$REPAIR" -eq 0 ] || fail '--install-dir and --repair apply only to standalone installation'
+        check_downgrade "$ngit_existing"
+        command_exists cargo || fail 'Cargo is not available; install Cargo or rerun with --method standalone to use downloaded binaries'
+        info "Updating ngit to v$VERSION through Cargo in $ngit_cargo_root (default registry and default features)"
+        # Run from the detected Cargo root rather than the caller's directory,
+        # avoiding repo-local .cargo/config.toml but retaining user config.
+        (cd "$ngit_cargo_root" && cargo install ngit --locked --version "$VERSION" --root "$ngit_cargo_root")
+        ngit_dir=$ngit_existing_dir
+        report_path
+        exit 0
+    fi
+
+    if is_nixos && [ "$FORCE_STANDALONE" -ne 1 ]; then
+        nixos_install_guidance
+        exit 1
+    fi
+
+    if [ "$INSTALL_METHOD" = auto ] && [ -n "$ngit_existing" ] && ! valid_receipt "$ngit_existing_dir" && [ "$REPAIR" -ne 1 ]; then
+        warn "Existing installation: $ngit_existing"
+        if [ -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+            fail 'invalid standalone receipt; rerun with --repair to repair it'
+        fi
+        if [ -n "$ngit_cargo_root" ]; then
+            warn 'To keep using Cargo: rerun this installer with --method cargo'
+        fi
+        warn 'Update the existing installation through its original package manager (for example, nix profile upgrade for a Nix profile). Unknown installations are not adopted automatically.'
+        fail 'To install a standalone copy with ngit update support: rerun with --method standalone (optionally --install-dir DIR). Package-managed files will not be overwritten.'
+    fi
+    if [ -n "$ngit_existing" ]; then
+        check_downgrade "$ngit_existing"
+    fi
+    ngit_dir=$(find_install_dir)
+    mkdir -p "$ngit_dir" || fail 'cannot create the standalone directory; choose --install-dir DIR'
+    ngit_dir=$(cd -P "$ngit_dir" && pwd)
+    case "$ngit_dir/" in /nix/store/*) fail 'Nix store installations must be updated through Nix' ;; esac
+    mkdir "$ngit_dir/.ngit-install-lock" 2>/dev/null || fail 'another installer is running or left .ngit-install-lock; inspect it before retrying'
+    ngit_lock="$ngit_dir/.ngit-install-lock"
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    check_destination
+    check_downgrade "$ngit_dir/ngit"
+
+    ngit_target=$(detect_target) || fail 'this operating system and architecture are not supported by the standalone installer'
+    ngit_asset=$(select_asset "$ngit_target") || fail "the release has no unique asset for $ngit_target"
+    IFS='|' read -r _ ngit_url ngit_expected_sha ngit_filename ngit_mime <<EOF
+$ngit_asset
+EOF
+    case "$ngit_expected_sha" in
+        *[!0-9a-f]*|'') fail 'the rendered asset SHA-256 is invalid' ;;
+    esac
+    [ "${#ngit_expected_sha}" -eq 64 ] || fail 'the rendered asset SHA-256 is invalid'
+
+    ngit_temp=$(mktemp -d)
+    ngit_archive="$ngit_temp/$ngit_filename"
+    info "Downloading ngit v$VERSION for $ngit_target"
+    download_verified "$ngit_url" "$ngit_archive"
+
+    ngit_extract="$ngit_temp/extracted"
+    mkdir "$ngit_extract"
+    case "$ngit_filename:$ngit_mime" in
+        *.tar.gz:*|*.tgz:*|*:application/gzip) tar -xzf "$ngit_archive" -C "$ngit_extract" ;;
+        *.zip:*|*:application/zip) unzip -q "$ngit_archive" -d "$ngit_extract" ;;
+        *) fail "unsupported release archive $ngit_filename ($ngit_mime)" ;;
+    esac
+
+    info "Installing ngit and git-remote-nostr to $ngit_dir"
+    install_binaries
+    info "Installed ngit v$VERSION to $ngit_dir"
+    consolidate_standalone
+    report_path
+}
+
+main "$@"

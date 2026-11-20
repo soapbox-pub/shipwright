@@ -1,0 +1,27 @@
+[package]
+name = "concord-io"
+version = "0.1.0"
+description = "Shipwright's Concord (Armada) membership as a JSON-lines process: chat in on stdout, commands in on stdin"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.90"
+publish = false
+
+# The protocol kernel and headless client are armada-discord-bridge's: a
+# byte-compatible port of Armada's src/concord, pinned to vectors Armada itself
+# generates, that already follows rekeys, refoundings and Roles v2. Reusing it
+# instead of writing a fourth Concord implementation is the point; bump `rev`
+# when that repository moves.
+[dependencies]
+bridge = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "f84db37e522b9d0bdd592bb748d9cd29da698ac8" }
+concord = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "f84db37e522b9d0bdd592bb748d9cd29da698ac8" }
+anyhow = "1"
+nostr = { version = "0.45.5", features = ["std", "os-rng", "nip44"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true

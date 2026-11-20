@@ -1,0 +1,28 @@
+#!/bin/bash
+# Run a command as shipwright-worker with a clean, explicit environment.
+#
+#   sudo -u shipwright-worker /opt/shipwright/libexec/as-worker [VAR=value ...] -- cmd args...
+#
+# sudo already drops the caller's environment; this rebuilds the minimum and
+# takes VAR=value pairs for what a task needs (the agent's per-task proxy
+# token, say). Nothing of the service's (its nsec path, its Claude token)
+# can leak through, because nothing is inherited.
+set -euo pipefail
+umask 027
+envs=(
+  "HOME=/var/lib/shipwright-worker"
+  "USER=shipwright-worker"
+  "PATH=/usr/local/bin:/usr/bin:/bin"
+  "LANG=C.UTF-8"
+  "CI=1"
+)
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+  case "$1" in
+    *=*) envs+=("$1") ;;
+    *) echo "as-worker: expected VAR=value or --, got: $1" >&2; exit 64 ;;
+  esac
+  shift
+done
+[ "${1:-}" = "--" ] || { echo "as-worker: missing --" >&2; exit 64; }
+shift
+exec env -i "${envs[@]}" "$@"
