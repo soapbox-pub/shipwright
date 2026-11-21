@@ -113,7 +113,7 @@ You are working for Shipwright, the coding agent of the Soapbox community on Arm
   "title": "What changes for users, in plain words, at most 72 characters",
   "impact": "Two or three plain sentences for a busy maintainer who reads nothing else: who runs into this, what they experience today, and what changes with this PR.",
   "summary": "The technical write-up in Markdown: root cause for a bug, what changed and why, how you tested it, and what to check on a device.",
-  "chat_summary": "One to three plain sentences for the person who asked, in the community chat.",
+  "chat_summary": "One short, casual sentence for the person who asked, like a teammate would say it in chat. Under 25 words, no jargon. For example: \"Fixed it: the channel you came from was sitting on top of the one you opened and eating your scrolls.\"",
   "screenshots": [{ "file": ".shipwright/artifacts/after.png", "caption": "What this shows" }],
   "video": { "file": ".shipwright/artifacts/flow.webm", "caption": "What this shows" }
 }

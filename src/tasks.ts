@@ -39,6 +39,11 @@ export interface Task {
   sessionId?: string;
   /** The default branch's tip when work began; commits are counted from here. */
   base?: string;
+  /**
+   * Post in chat when the current round finishes. Always for the first PR;
+   * for a revision only if someone asked Shipwright for it directly.
+   */
+  announce?: boolean;
   /** Checkout and worktree deleted. */
   swept?: boolean;
   branch: string;
@@ -93,6 +98,7 @@ export class TaskStore {
       // nsite d tags: ^[a-z0-9-]{1,13}$
       nsiteId: `sw-${id}`,
       media: [],
+      announce: true,
       messageIds: [],
       costUsd: 0,
     };

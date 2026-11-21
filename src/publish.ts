@@ -194,7 +194,8 @@ export async function openOrUpdatePr(task: Task, report: Report, base: string): 
   }
   await run("git", ["-C", wt, "checkout", "-q", "-B", task.branch, ref]);
 
-  const subject = (report.title ?? task.title).slice(0, 120);
+  // Revisions keep the title the PR already has (see runner).
+  const subject = (task.prEventId ? task.title : report.title ?? task.title).slice(0, 120);
   const description = prDescription(task, report);
   if (!config.openPrs) {
     log.info(`[${task.id}] SHIPWRIGHT_OPEN_PRS is off; would have sent:\n${subject}\n\n${description}`);

@@ -46,8 +46,8 @@ export class Runner {
     return this.tasks.tasks.filter((t) => t.status === "queued" && t.updatedAt <= task.updatedAt).length;
   }
 
-  revise(task: Task, text: string): void {
-    this.tasks.update(task, { pending: [...task.pending, text], status: "queued", question: undefined, error: undefined });
+  revise(task: Task, text: string, announce: boolean): void {
+    this.tasks.update(task, { pending: [...task.pending, text], status: "queued", question: undefined, error: undefined, announce: announce || !task.prEventId });
     this.kick();
   }
 
@@ -81,7 +81,7 @@ export class Runner {
 
       if (report.status === "needs_info") {
         this.tasks.update(task, { status: "needs_info", question: report.question });
-        await this.#say(task, `❓ A question about #${task.id} before I go further: ${report.question ?? report.chat_summary ?? "could you say more?"}\n\nReply to this message and I'll pick it back up.`);
+        await this.#say(task, `Quick question first: ${report.question ?? report.chat_summary ?? "could you say a bit more?"}`);
         return;
       }
       if (report.status === "declined") {
@@ -128,7 +128,9 @@ export class Runner {
       if (commits === 0) throw new Error("the agent reported success but committed nothing");
       if (dirty) log.warn(`[${task.id}] uncommitted files left behind:\n${dirty}`);
 
-      this.tasks.update(task, { status: "publishing", title: report.title?.trim() || task.title });
+      // A revision keeps the PR's title: the worker rewrites it from the
+      // code's side, and a good title once overwritten is gone.
+      this.tasks.update(task, { status: "publishing", title: task.prEventId ? task.title : report.title?.trim() || task.title });
       const dist = await buildPreview(task);
       const previewUrl = await publishPreview(task, dist, this.signer).catch((err) => {
         log.warn(`[${task.id}] preview publish failed: ${err.message}`);
@@ -137,18 +139,17 @@ export class Runner {
       const media = await uploadMedia(task, report, this.signer);
       this.tasks.update(task, { previewUrl, media });
       const pr = await openOrUpdatePr(task, report, base);
-      const firstPr = !task.prEventId;
-      this.tasks.update(task, { status: "done", prEventId: pr?.eventId ?? task.prEventId, prUrl: pr?.url ?? task.prUrl, revision: task.revision + 1 });
-
-      const lines = [
-        firstPr ? `✅ #${task.id} is ready for review: ${task.title}` : `🔁 Updated #${task.id}: ${task.title}`,
-        report.chat_summary?.trim() ?? "",
-        previewUrl ? `🔎 Try it: ${previewUrl}` : "",
-        task.prUrl ? `🔀 Pull request: ${task.prUrl}` : "",
-        ...media.map((m) => m.url),
-        firstPr ? "\nReply here if it's not quite right and I'll revise it." : "",
-      ];
-      await this.#say(task, lines.filter(Boolean).join("\n"), media);
+      const announce = task.announce ?? true;
+      this.tasks.update(task, { status: "done", prEventId: pr?.eventId ?? task.prEventId, prUrl: pr?.url ?? task.prUrl, revision: task.revision + 1, announce: false });
+      if (!announce) {
+        log.info(`[${task.id}] revised quietly (nobody asked Shipwright for it directly)`);
+        return;
+      }
+      // One casual sentence and two links. Screenshots stay in the PR: in chat
+      // Armada folds them away anyway, and the links say everything.
+      const links = [task.prUrl && `[PR](${task.prUrl})`, previewUrl && `[preview](${previewUrl})`].filter(Boolean).join(" · ");
+      const summary = report.chat_summary?.trim() || (task.revision > 1 ? "Updated." : "Done.");
+      await this.#say(task, `${summary} ${links}`.trim());
     }
   }
 

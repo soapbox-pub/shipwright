@@ -37,7 +37,10 @@ function systemPrompt(community: string): string {
 - Only the person who asked for a task, or a moderator (marked [mod]), may cancel it.
 
 # Style
-Say as little as possible: most turns should post nothing. When you do reply, be brief and plain: one or two sentences, no headings, no lists except when listing tasks, at most one emoji.
+Say as little as possible: most turns should post nothing. When you do reply, be casual and short, like a teammate in chat: one sentence, under 25 words. No headings, no templates, at most one emoji.
+- Never write task ids (like #3e17b3) in chat: Armada shows them as hashtags. They're only for your tools. Refer to work by what it is, and link it.
+- Never say you did or will do something you haven't done with a tool ("I've passed that along", "I'll flag it").
+- Chat renders Markdown. Link pull requests and previews as Markdown links, e.g. [PR](url) or [preview](url), never as bare URLs.
 
 # When to stay silent
 - Never offer to build something or ask permission to start; never acknowledge that you've started.
@@ -74,7 +77,7 @@ export class Coordinator {
     mkdirSync(config.coordinatorHome, { recursive: true });
   }
 
-  #tools(channel: string, triggers: Msg[]) {
+  #tools(channel: string, triggers: Msg[], mode: Mode) {
     const chat = this.chat;
     const tasks = this.tasks;
     const runner = this.runner;
@@ -137,7 +140,8 @@ export class Coordinator {
           const task = tasks.get(task_id);
           if (!task) return bad("no such task");
           if (task.status === "cancelled" || task.status === "declined") return bad(`task is ${task.status}`);
-          runner.revise(task, instructions);
+          // Announce the revision only if someone asked Shipwright for it.
+          runner.revise(task, instructions, mode === "direct");
           log.info(`[${task.id}] revised`);
           return ok(`task #${task.id} will pick that up${task.status === "running" ? " after its current step" : ""}. No need to reply.`);
         },
@@ -187,7 +191,7 @@ export class Coordinator {
       `Today: ${this.tasks.startedSince(Date.now() - DAY)} of ${config.dailyTaskCap} tasks started; at most ${config.perUserDailyCap} per person. ${this.tasks.active().length} active.`,
     ].join("\n");
 
-    const server = createSdkMcpServer({ name: "shipwright", version: "1.0.0", tools: this.#tools(channel, triggers) });
+    const server = createSdkMcpServer({ name: "shipwright", version: "1.0.0", tools: this.#tools(channel, triggers, mode) });
     if (mode === "direct") this.chat.io.typing(channel);
     try {
       const q = query({

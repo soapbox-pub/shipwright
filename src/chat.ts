@@ -152,17 +152,19 @@ export class Chat {
 
   // ── Speaking ──
 
-  /** Reply tags: a kind-9 inline quote (NIP-C7), or a NIP-22 comment in a thread. */
+  /**
+   * Always a thread reply (NIP-22 kind 1111, as Armada's buildConcordCommentTags):
+   * on the message itself, or in the thread it's already part of. Inline
+   * kind-9 quote replies put every back-and-forth in the main channel, which
+   * is noise for everyone else reading it.
+   */
   replyShape(parent: SourceRef | Msg): { kind: number; tags: string[][] } {
-    if (parent.kind === KIND_COMMENT) {
-      const tags: string[][] = [];
-      const root = parent.tags.filter(([n]) => n === "K" || n === "E" || n === "P");
-      if (root.length) for (const t of root) tags.push([...t]);
-      else tags.push(["K", String(parent.kind)], ["E", parent.id, "", parent.pubkey], ["P", parent.pubkey]);
-      tags.push(["k", String(parent.kind)], ["e", parent.id, "", parent.pubkey], ["p", parent.pubkey]);
-      return { kind: KIND_COMMENT, tags };
-    }
-    return { kind: KIND_MESSAGE, tags: [["q", parent.id, "", parent.pubkey], ["p", parent.pubkey]] };
+    const tags: string[][] = [];
+    const root = parent.kind === KIND_COMMENT ? parent.tags.filter(([n]) => n === "K" || n === "E" || n === "P") : [];
+    if (root.length) for (const t of root) tags.push([...t]);
+    else tags.push(["K", String(parent.kind)], ["E", parent.id, "", parent.pubkey], ["P", parent.pubkey]);
+    tags.push(["k", String(parent.kind)], ["e", parent.id, "", parent.pubkey], ["p", parent.pubkey]);
+    return { kind: KIND_COMMENT, tags };
   }
 
   async post(channel: string, text: string, opts: { replyTo?: SourceRef | Msg; media?: Media[] } = {}): Promise<string> {
