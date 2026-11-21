@@ -70,7 +70,18 @@ export function refreshMirror(): Promise<string> {
 /** A fresh checkout for the task, owned by the worker, with dependencies. */
 export async function prepareCheckout(task: Task, base: string): Promise<void> {
   const dir = checkoutOf(task);
-  if (existsSync(`${dir}/.git`)) return;
+  // A checkout counts as ready only once every step below has run. Trusting
+  // an existing .git let a retry skip the branch and the npm ci after a
+  // first attempt had failed halfway, and the agent then worked on the wrong
+  // base. A half-made checkout holds no work yet, so it is rebuilt.
+  const marker = `${dir}/.git/shipwright-prepared`;
+  if (existsSync(marker)) return;
+  if (existsSync(dir)) {
+    log.warn(`[${task.id}] rebuilding a checkout that was never finished`);
+    await runAsWorker("rm", ["-rf", dir]);
+  }
+  // A fetch may have left objects the worker can't read; the clone borrows them.
+  await run("chmod", ["-R", "a+rX", `${config.mirrorDir}/.git/objects`]);
   await runAsWorker("git", ["clone", "--shared", "--no-checkout", config.mirrorDir, dir], { timeoutMs: 10 * 60_000 });
   await runAsWorker("git", ["-C", dir, "checkout", "-q", "-b", task.branch, base]);
   // Artifacts and scratch live in .shipwright/, never in a commit.
@@ -80,6 +91,7 @@ export async function prepareCheckout(task: Task, base: string): Promise<void> {
   await runAsWorker("npx", ["playwright", "install", "chromium"], { cwd: dir, timeoutMs: 15 * 60_000 }).catch((err) =>
     log.warn(`[${task.id}] playwright install failed (screenshots may not work): ${err.message}`),
   );
+  await runAsWorker("touch", [marker]);
 }
 
 // ── The agent ───────────────────────────────────────────────────────────────
