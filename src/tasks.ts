@@ -44,6 +44,10 @@ export interface Task {
    * for a revision only if someone asked Shipwright for it directly.
    */
   announce?: boolean;
+  /** How many of `pending` the running agent has already been given. */
+  delivered?: number;
+  /** The service restarted under a running agent; resume its session. */
+  interrupted?: boolean;
   /** Checkout and worktree deleted. */
   swept?: boolean;
   branch: string;
@@ -68,8 +72,13 @@ export class TaskStore {
 
   load(): void {
     if (existsSync(file())) this.tasks = JSON.parse(readFileSync(file(), "utf8"));
-    // A restart mid-task: the session survives on disk, so pick it back up.
-    for (const t of this.tasks) if (t.status === "running" || t.status === "publishing") t.status = "queued";
+    // A restart must cost nothing but a few minutes. A running agent's session
+    // is saved as it starts and Claude Code keeps it on disk, so it resumes
+    // where it stopped; publishing reruns from the finished report.
+    for (const t of this.tasks) {
+      if (t.status === "running") Object.assign(t, { status: "queued", interrupted: true });
+      if (t.status === "publishing") t.status = "republish";
+    }
   }
 
   save(): Promise<void> {

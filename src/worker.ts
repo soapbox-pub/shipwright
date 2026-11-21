@@ -155,6 +155,14 @@ ${task.pending.join("\n\n")}
 Work through it as your instructions describe, and finish by writing .shipwright/report.json.`;
 }
 
+/** After a service restart cut the agent off mid-turn. */
+function resumePrompt(task: Task, given: number): string {
+  const fresh = task.pending.slice(given);
+  return `Shipwright restarted while you were working on task ${task.id}, and your last step was cut off. Check where you got to (git status, git log, .shipwright/) and carry on from there: finish the work, run the tests, and write .shipwright/report.json as your instructions describe.${
+    fresh.length ? `\n\nMore from the community arrived meanwhile:\n\n<request>\n${fresh.join("\n\n")}\n</request>` : ""
+  }`;
+}
+
 function followUpPrompt(task: Task): string {
   return `More from the community about task ${task.id}:
 
@@ -189,7 +197,8 @@ function spawnAsWorker(token: string) {
   };
 }
 
-export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort: AbortController): Promise<WorkerOutcome> {
+/** `given`: how many of task.pending the interrupted session already had. */
+export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort: AbortController, onSession: (id: string) => void, given = 0): Promise<WorkerOutcome> {
   const dir = checkoutOf(task);
   // A stale report from the previous round must not pass for this one.
   await runAsWorker("rm", ["-f", `${dir}/.shipwright/report.json`]);
@@ -200,7 +209,7 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
   let lastText = "";
   try {
     const q = query({
-      prompt: task.sessionId ? followUpPrompt(task) : firstPrompt(task),
+      prompt: task.sessionId && task.interrupted ? resumePrompt(task, given) : task.sessionId ? followUpPrompt(task) : firstPrompt(task),
       options: {
         model: config.workerModel,
         cwd: dir,
@@ -227,7 +236,10 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
       },
     });
     for await (const m of q as AsyncIterable<SDKMessage>) {
-      if (m.type === "system" && m.subtype === "init") sessionId = m.session_id;
+      if (m.type === "system" && m.subtype === "init") {
+        sessionId = m.session_id;
+        onSession(sessionId); // saved now, so a restart can resume it
+      }
       if (m.type === "assistant") {
         for (const block of m.message.content) {
           if (block.type === "text" && block.text.trim()) lastText = block.text.trim();

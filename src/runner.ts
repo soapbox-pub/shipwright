@@ -47,7 +47,10 @@ export class Runner {
   }
 
   revise(task: Task, text: string, announce: boolean): void {
-    this.tasks.update(task, { pending: [...task.pending, text], status: "queued", question: undefined, error: undefined, announce: announce || !task.prEventId });
+    // A running task keeps running; it picks this up in another round when
+    // the current one ends (see #execute).
+    const status = this.#running.has(task.id) ? task.status : "queued";
+    this.tasks.update(task, { pending: [...task.pending, text], status, question: undefined, error: undefined, announce: announce || task.announce || !task.prEventId });
     this.kick();
   }
 
@@ -72,9 +75,18 @@ export class Runner {
       const base = task.base ?? (await refreshMirror());
       if (!task.base) this.tasks.update(task, { base });
       await prepareCheckout(task, base);
-      log.info(`[${task.id}] agent starting (${task.sessionId ? "resumed" : "new"}, slot ${slot})`);
-      const outcome = await runAgent(task, this.proxy, config.devPortBase + slot, abort);
-      this.tasks.update(task, { sessionId: outcome.sessionId, costUsd: task.costUsd + outcome.costUsd, pending: [] });
+      log.info(`[${task.id}] agent starting (${task.interrupted ? "resuming after a restart" : task.sessionId ? "resumed" : "new"}, slot ${slot})`);
+      // Everything pending now goes to the agent; what arrives later waits.
+      const given = task.interrupted ? (task.delivered ?? 0) : 0;
+      this.tasks.update(task, { delivered: task.pending.length });
+      const outcome = await runAgent(task, this.proxy, config.devPortBase + slot, abort, (sessionId) => this.tasks.update(task, { sessionId }), given);
+      this.tasks.update(task, {
+        sessionId: outcome.sessionId,
+        costUsd: task.costUsd + outcome.costUsd,
+        pending: task.pending.slice(task.delivered ?? 0),
+        delivered: 0,
+        interrupted: false,
+      });
       if ((task.status as string) === "cancelled") return;
       const { report } = outcome;
       log.info(`[${task.id}] agent reported ${report.status} after ${Math.round((Date.now() - t0) / 60_000)} min`);
@@ -94,6 +106,11 @@ export class Runner {
       await this.#publish(task, base, report);
     } catch (err) {
       this.#failed(task, err);
+    } finally {
+      // Instructions that came in during the round get a round of their own.
+      if (task.pending.length > (task.delivered ?? 0) && !["cancelled", "running"].includes(task.status)) {
+        this.tasks.update(task, { status: "queued" });
+      }
     }
   }
 
