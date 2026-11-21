@@ -117,6 +117,8 @@ export class Runner {
       await this.#say(task, lines.filter(Boolean).join("\n"), media);
     } catch (err) {
       const message = (err as Error).message;
+      const spent = (err as { costUsd?: number }).costUsd;
+      if (spent) this.tasks.update(task, { costUsd: task.costUsd + spent });
       log.error(`[${task.id}] failed: ${message}`);
       if ((task.status as string) === "cancelled") return;
       // Silent too: a failure is for the maintainers, who have the logs.

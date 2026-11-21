@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { AuthProxy } from "./authproxy.ts";
 import type { Chat, Msg } from "./chat.ts";
 import { config } from "./config.ts";
+import { recordCost } from "./costs.ts";
 import { log } from "./log.ts";
 import { profileNames } from "./nostr.ts";
 import type { Runner } from "./runner.ts";
@@ -216,6 +217,7 @@ export class Coordinator {
       // nothing: "did it see that message?" must always have an answer.
       const actions: string[] = [];
       let thought = "";
+      let cost = 0;
       for await (const m of q as AsyncIterable<SDKMessage>) {
         if (m.type === "assistant") {
           for (const b of m.message.content) {
@@ -226,9 +228,13 @@ export class Coordinator {
             if (b.type === "text" && b.text.trim()) thought = b.text.trim().replace(/\s+/g, " ");
           }
         }
-        if (m.type === "result" && m.subtype !== "success") log.warn(`coordinator turn ended: ${m.subtype}`);
+        if (m.type === "result") {
+          cost = m.total_cost_usd ?? 0;
+          if (m.subtype !== "success") log.warn(`coordinator turn ended: ${m.subtype}`);
+        }
       }
-      log.info(`${turnTag}: ${actions.length ? actions.join(", ") : "no action"}${thought ? ` | ${thought.slice(0, 240)}` : ""}`);
+      await recordCost({ kind: "coordinator", usd: cost, model: config.coordinatorModel });
+      log.info(`${turnTag}: ${actions.length ? actions.join(", ") : "no action"} ($${cost.toFixed(4)})${thought ? ` | ${thought.slice(0, 240)}` : ""}`);
     } catch (err) {
       // Logged, never posted: errors in chat are noise to everyone but us.
       log.error(`${turnTag}: failed: ${(err as Error).message}`);

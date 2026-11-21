@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { query, type SDKMessage, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { AuthProxy } from "./authproxy.ts";
 import { config } from "./config.ts";
+import { recordCost } from "./costs.ts";
 import { log } from "./log.ts";
 import { run, runAsWorker, workerCommand } from "./proc.ts";
 import type { Task } from "./tasks.ts";
@@ -225,10 +226,14 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
   } finally {
     clearTimeout(timer);
     proxy.revoke(token);
+    // Here, not on success only: failed and timed-out runs cost the most.
+    // (A run killed before its result message reports nothing to record.)
+    await recordCost({ kind: "worker", usd: costUsd, model: config.workerModel, task: task.id });
   }
   const report = await readReport(task);
   if (!report) {
-    throw new Error(abort.signal.aborted ? "the agent ran out of time" : `the agent finished without a report${lastText ? `; its last words: ${lastText.slice(0, 300)}` : ""}`);
+    const err = new Error(abort.signal.aborted ? "the agent ran out of time" : `the agent finished without a report${lastText ? `; its last words: ${lastText.slice(0, 300)}` : ""}`);
+    throw Object.assign(err, { costUsd });
   }
   return { report, sessionId, costUsd };
 }
