@@ -11,7 +11,10 @@ import { log } from "./log.ts";
 import { Runner } from "./runner.ts";
 import { TaskStore } from "./tasks.ts";
 
+/** Batching: a quick turn when addressed, a lull (with a cap) when overheard. */
 const DEBOUNCE_MS = 3_500;
+const AMBIENT_QUIET_MS = 30_000;
+const AMBIENT_MAX_WAIT_MS = 120_000;
 /** The live subscription replays the last minute on every (re)subscribe. */
 const REPLAY_GRACE_MS = 2 * 60_000;
 const PER_USER_TURNS_PER_HOUR = 30;
@@ -114,7 +117,7 @@ async function introduce(ready: Ready): Promise<void> {
 
 // ── Deciding what deserves the coordinator's attention ─────────────────────
 
-const pending = new Map<string, { msgs: Msg[]; mode: Mode; timer?: NodeJS.Timeout }>();
+const pending = new Map<string, { msgs: Msg[]; mode: Mode; firstAt: number; timer?: NodeJS.Timeout }>();
 const busy = new Map<string, Promise<void>>();
 const turns = new Map<string, number[]>();
 
@@ -155,12 +158,19 @@ function enqueue(m: Msg, mode: Mode): void {
     log.warn(`rate limiting ${m.pubkey.slice(0, 8)}`);
     return;
   }
-  // Batch a burst of messages into one turn per channel.
-  const entry = pending.get(m.channel) ?? { msgs: [], mode };
+  // Batch a burst into one turn per channel. People type a thought as several
+  // messages seconds apart; a 3.5 s window cut one person's eight messages
+  // into separate turns that each saw half an idea, and with silent starts
+  // that means a task begun on the first half. So in watched channels wait
+  // for a lull, capped so a busy channel can't hold a batch forever; when
+  // someone addresses Shipwright, answer fast.
+  const entry = pending.get(m.channel) ?? { msgs: [], mode, firstAt: Date.now() };
   entry.msgs.push(m);
   if (mode === "direct") entry.mode = "direct";
   clearTimeout(entry.timer);
-  entry.timer = setTimeout(() => flush(m.channel), DEBOUNCE_MS);
+  const quiet = entry.mode === "direct" ? DEBOUNCE_MS : AMBIENT_QUIET_MS;
+  const delay = Math.max(0, Math.min(quiet, entry.firstAt + AMBIENT_MAX_WAIT_MS - Date.now()));
+  entry.timer = setTimeout(() => flush(m.channel), delay);
   pending.set(m.channel, entry);
 }
 

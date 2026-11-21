@@ -23,7 +23,7 @@ function systemPrompt(community: string): string {
 # What you do
 - When someone reports a bug in Armada or asks for a feature, decide whether it's actionable: specific enough that a good engineer could start (what's wrong or wanted, and roughly where). If it is, call start_task with a brief written for that engineer: what's wanted, observed vs expected behaviour, steps to reproduce, platform (web, desktop, Android, iOS) and version if given, and anything useful from the conversation.
 - Starting a task is silent. Don't reply, don't react, don't announce it: Shipwright replies in the thread by itself when the pull request is ready, and that is the only message people should get about it.
-- Before starting, check the task list for the same thing. If it's already there, add any new details to it with revise_task, also silently.
+- Before starting, check the task list for the same problem, whatever its status, and compare symptoms, not wording. A "done" task has a pull request waiting for review: its fix hasn't shipped, so people will keep running into the problem and talking about it until it does. That is not a new task. Neither is more discussion of a problem the conversation is already about. In those cases do nothing, unless the new messages show the existing fix misses a case (a different trigger, platform or symptom it doesn't cover); then call revise_task on that task with exactly what it misses. Start a new task only for a genuinely different problem.
 - When someone adds information, answers a question you asked, or asks for changes to an existing task (they reply to Shipwright's message about it, or name its #id), call revise_task with exactly what they want, without replying.
 - When someone asks you something directly (what you're working on, how a task is going), answer from the task list.
 
@@ -43,7 +43,7 @@ Say as little as possible: most turns should post nothing. When you do reply, be
 - In ambient mode you are reading a channel where Armada is discussed, without being addressed. The developers talk there too. Start a task only for a concrete bug report or feature request for Armada that nobody has claimed ("I'll take this", a developer already on it, a developer describing their own work). Otherwise, and for anything vague, call no tools at all. Never reply in ambient mode.
 - In direct mode someone mentioned you or replied to you. If it's an actionable request, start it silently. If it's a request too vague to start, ask one short question. If it's a question for you, answer it. If it's thanks or acknowledgement, do nothing.
 
-Only your tool calls have any effect. Text you write outside of them is discarded, so reply with the reply tool.`;
+Only your tool calls have any effect: reply with the reply tool. End every turn with one short sentence of plain text saying what you decided and why (for example "No action: a developer describing their own fix."). Nobody in the chat sees it; it goes to the maintainers' log.`;
 }
 
 function describe(t: Task, names: Map<string, string>): string {
@@ -159,7 +159,14 @@ export class Coordinator {
 
   async handle(channel: string, triggers: Msg[], mode: Mode): Promise<void> {
     const recentTasks = this.tasks.recent(12);
-    const names = await profileNames([...recentTasks.map((t) => t.requester)], this.chat.relays);
+    const names = await profileNames([...recentTasks.map((t) => t.requester), ...triggers.map((m) => m.pubkey)], this.chat.relays);
+    // One person's run of messages is one thought; show it as one.
+    const byAuthor = new Map<string, Msg[]>();
+    for (const m of triggers) byAuthor.set(m.pubkey, [...(byAuthor.get(m.pubkey) ?? []), m]);
+    const newLines = [...byAuthor].map(([pk, ms]) => `- ${names.get(pk)}: ${ms.map((m) => `[${m.id.slice(0, 8)}]`).join(" ")}`);
+    const who = [...byAuthor].map(([pk, ms]) => `${names.get(pk)}${ms.length > 1 ? ` x${ms.length}` : ""}`).join(", ");
+    const turnTag = `turn #${this.chat.name(channel)} ${mode} (${who})`;
+    log.info(`${turnTag}: reading`);
     const prompt = [
       `Mode: ${mode}`,
       `Channel: #${this.chat.name(channel)}`,
@@ -167,7 +174,8 @@ export class Coordinator {
       "Recent conversation, oldest first:",
       await this.chat.transcript(channel),
       "",
-      `New since you last looked (these are what you're responding to): ${triggers.map((m) => `[${m.id.slice(0, 8)}]`).join(", ")}`,
+      "New since you last looked (these are what you're responding to), by author. Several messages in a row from one person are one thought: read them together, and act on the whole of it once.",
+      ...newLines,
       ...(triggers.some((m) => m.ms < Date.now() - 10 * 60_000)
         ? ["You were offline when some of these were sent. If you reply to one of those, briefly apologise for the slow answer."]
         : []),
@@ -204,17 +212,26 @@ export class Coordinator {
           },
         },
       });
+      // Every turn leaves a line, including the ones that decide to do
+      // nothing: "did it see that message?" must always have an answer.
+      const actions: string[] = [];
+      let thought = "";
       for await (const m of q as AsyncIterable<SDKMessage>) {
         if (m.type === "assistant") {
-          for (const b of m.message.content) if (b.type === "tool_use") log.info(`coordinator: ${b.name} ${JSON.stringify(b.input).slice(0, 200)}`);
+          for (const b of m.message.content) {
+            if (b.type === "tool_use") {
+              actions.push(b.name.replace("mcp__shipwright__", ""));
+              log.info(`coordinator: ${b.name} ${JSON.stringify(b.input).slice(0, 200)}`);
+            }
+            if (b.type === "text" && b.text.trim()) thought = b.text.trim().replace(/\s+/g, " ");
+          }
         }
         if (m.type === "result" && m.subtype !== "success") log.warn(`coordinator turn ended: ${m.subtype}`);
       }
+      log.info(`${turnTag}: ${actions.length ? actions.join(", ") : "no action"}${thought ? ` | ${thought.slice(0, 240)}` : ""}`);
     } catch (err) {
-      log.error(`coordinator turn failed: ${(err as Error).message}`);
-      if (mode === "direct") {
-        await this.chat.post(channel, "Sorry, I hit a problem on my end and couldn't respond to that. Try me again in a bit.", { replyTo: triggers.at(-1) }).catch(() => {});
-      }
+      // Logged, never posted: errors in chat are noise to everyone but us.
+      log.error(`${turnTag}: failed: ${(err as Error).message}`);
     }
   }
 }
