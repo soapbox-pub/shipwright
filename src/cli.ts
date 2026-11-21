@@ -5,6 +5,9 @@
 //   tasks                         list tasks
 //   cost                          spend today, the last 7 days, and the priciest tasks
 //   show <id>                     one task in full
+//   publish <id>                  redo a finished task's publishing (preview, media,
+//                                 PR) without re-running the agent; service stopped
+//   retry <id>                    queue a failed task to run again; service stopped
 //   run --title T --brief B [--kind bug|feature]
 //                                 run a task start to finish without chat
 //                                 (set SHIPWRIGHT_OPEN_PRS=0 to stop short of the PR)
@@ -24,6 +27,18 @@ const { positionals, values } = parseArgs({
 });
 const tasks = new TaskStore();
 tasks.load();
+
+/** Commands that change tasks must not race the service's copy of them. */
+function requireServiceStopped(): void {
+  try {
+    const pid = Number(readFileSync(`${config.stateDir}/service.pid`, "utf8"));
+    process.kill(pid, 0);
+    console.error(`the service is running (pid ${pid}); stop it first: systemctl stop shipwright`);
+    process.exit(1);
+  } catch {}
+}
+
+
 
 switch (positionals[0]) {
   case "tasks":
@@ -60,6 +75,24 @@ switch (positionals[0]) {
     }
     break;
   }
+  case "publish": {
+    requireServiceStopped();
+    const t = tasks.get(positionals[1] ?? "");
+    if (!t) throw new Error("no such task");
+    tasks.update(t, { status: "republish", error: undefined });
+    await tasks.save();
+    console.log(`#${t.id} marked; when the service starts it publishes it and replies in the thread`);
+    break;
+  }
+  case "retry": {
+    requireServiceStopped();
+    const t = tasks.get(positionals[1] ?? "");
+    if (!t) throw new Error("no such task");
+    tasks.update(t, { status: "queued", error: undefined });
+    await tasks.save();
+    console.log(`#${t.id} queued; it runs when the service starts`);
+    break;
+  }
   case "show": {
     const t = tasks.get(positionals[1] ?? "");
     console.log(t ? JSON.stringify(t, null, 2) : "no such task");
@@ -88,5 +121,5 @@ switch (positionals[0]) {
     process.exit(0);
   }
   default:
-    console.log("commands: tasks | cost | show <id> | run --title T --brief B [--kind bug|feature]");
+    console.log("commands: tasks | cost | show <id> | publish <id> | retry <id> | run --title T --brief B [--kind bug|feature]");
 }

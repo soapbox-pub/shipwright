@@ -7,7 +7,7 @@ import { log } from "./log.ts";
 import type { Signer } from "./nostr.ts";
 import { openOrUpdatePr, publishPreview, removePublishWorktree, uploadMedia } from "./publish.ts";
 import type { Task, TaskStore } from "./tasks.ts";
-import { buildPreview, inspectCheckout, prepareCheckout, refreshMirror, removeCheckout, runAgent } from "./worker.ts";
+import { buildPreview, inspectCheckout, prepareCheckout, readReport, refreshMirror, removeCheckout, runAgent, type Report } from "./worker.ts";
 
 export class Runner {
   tasks: TaskStore;
@@ -25,8 +25,8 @@ export class Runner {
 
   /** Start whatever fits in the free slots, oldest first. */
   kick(): void {
-    const queued = this.tasks.tasks.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt);
-    for (const task of queued) {
+    const waiting = this.tasks.tasks.filter((t) => t.status === "queued" || t.status === "republish").sort((a, b) => a.updatedAt - b.updatedAt);
+    for (const task of waiting) {
       if (this.#running.size >= config.maxParallel) return;
       if (this.#running.has(task.id)) continue;
       const used = new Set([...this.#running.values()].map((r) => r.slot));
@@ -34,7 +34,8 @@ export class Runner {
       while (used.has(slot)) slot++;
       const abort = new AbortController();
       this.#running.set(task.id, { abort, slot });
-      void this.#execute(task, slot, abort).finally(() => {
+      const job = task.status === "republish" ? this.republish(task) : this.#execute(task, slot, abort);
+      void job.finally(() => {
         this.#running.delete(task.id);
         this.kick();
       });
@@ -90,6 +91,39 @@ export class Runner {
         return;
       }
 
+      await this.#publish(task, base, report);
+    } catch (err) {
+      this.#failed(task, err);
+    }
+  }
+
+  /**
+   * Publish finished work again without re-running the agent: for a task
+   * whose agent finished but whose preview or PR step failed.
+   */
+  async republish(task: Task): Promise<void> {
+    try {
+      const report = await readReport(task);
+      if (report?.status !== "done") throw new Error(`#${task.id} has no finished report to publish`);
+      if (!task.base) throw new Error(`#${task.id} has no base commit`);
+      await this.#publish(task, task.base, report);
+    } catch (err) {
+      this.#failed(task, err);
+    }
+  }
+
+  #failed(task: Task, err: unknown): void {
+    const message = (err as Error).message;
+    const spent = (err as { costUsd?: number }).costUsd;
+    if (spent) this.tasks.update(task, { costUsd: task.costUsd + spent });
+    log.error(`[${task.id}] failed: ${message}`);
+    if ((task.status as string) === "cancelled") return;
+    // Silent: a failure is for the maintainers, who have the logs.
+    this.tasks.update(task, { status: "failed", error: message.slice(0, 2000) });
+  }
+
+  async #publish(task: Task, base: string, report: Report): Promise<void> {
+    {
       const { commits, dirty } = await inspectCheckout(task, base);
       if (commits === 0) throw new Error("the agent reported success but committed nothing");
       if (dirty) log.warn(`[${task.id}] uncommitted files left behind:\n${dirty}`);
@@ -115,14 +149,6 @@ export class Runner {
         firstPr ? "\nReply here if it's not quite right and I'll revise it." : "",
       ];
       await this.#say(task, lines.filter(Boolean).join("\n"), media);
-    } catch (err) {
-      const message = (err as Error).message;
-      const spent = (err as { costUsd?: number }).costUsd;
-      if (spent) this.tasks.update(task, { costUsd: task.costUsd + spent });
-      log.error(`[${task.id}] failed: ${message}`);
-      if ((task.status as string) === "cancelled") return;
-      // Silent too: a failure is for the maintainers, who have the logs.
-      this.tasks.update(task, { status: "failed", error: message.slice(0, 2000) });
     }
   }
 

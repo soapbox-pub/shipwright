@@ -1,5 +1,5 @@
 // Shipwright: boot, wiring, and deciding which messages deserve a look.
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { AuthProxy } from "./authproxy.ts";
 import { Chat, type Msg } from "./chat.ts";
 import type { ChatMessage, Ready } from "./concord.ts";
@@ -23,6 +23,9 @@ const SLASH = /^\/(bug|feature|tasks|shipwright)\b/i;
 const CATCH_UP_MS = 6 * 3600_000;
 
 mkdirSync(config.stateDir, { recursive: true });
+// The CLI refuses to edit tasks while this runs: the service holds them in
+// memory and would write its copy over the CLI's.
+writeFileSync(`${config.stateDir}/service.pid`, String(process.pid));
 const signer = await loadOrCreateKey();
 log.info(`I am ${signer.npub}`);
 

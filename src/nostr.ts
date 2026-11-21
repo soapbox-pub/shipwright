@@ -16,7 +16,18 @@ import { log } from "./log.ts";
 // useWebSocketImplementation: the package's main entry is a separate bundle
 // with its own copy of the setting, and importing the pool from there quietly
 // keeps the built-in WebSocket.
-useWebSocketImplementation(WebSocket);
+//
+// And ws itself emits 'error' when a socket is closed before it connects,
+// which nostr-tools does on a connection timeout; with no listener attached
+// at that moment, Node throws it and the service dies. Every socket gets a
+// listener from birth. nostr-tools' own onerror still sees the error.
+class QuietWebSocket extends WebSocket {
+  constructor(...args: ConstructorParameters<typeof WebSocket>) {
+    super(...args);
+    this.on("error", () => {});
+  }
+}
+useWebSocketImplementation(QuietWebSocket);
 
 export const pool = new SimplePool({ enablePing: true, enableReconnect: true });
 

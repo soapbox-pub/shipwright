@@ -204,7 +204,11 @@ export async function openOrUpdatePr(task: Task, report: Report, base: string): 
     "send",
     "--defaults",
     "--force-pr",
-    "--base", `refs/remotes/origin/${config.defaultBranch}`,
+    // The commit the task started from, not today's main: main keeps moving
+    // while a task runs (another task's refresh moves it), and ngit refuses
+    // a base the branch doesn't descend from. Two finished tasks were lost
+    // to that before their PRs were sent.
+    "--base", base,
     "--subject", subject,
     "--description", description,
     "--json",

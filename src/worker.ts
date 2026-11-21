@@ -52,9 +52,13 @@ export function refreshMirror(): Promise<string> {
     }
     // Workers clone from here as another user. The service's umask (027)
     // would make every object a fetch adds unreadable to them, and git then
-    // reports the branch as "a null OID". The code is public; write it so.
+    // reports a branch as "a null OID" or a commit as "not a tree". The code
+    // is public; write it so. core.sharedRepository alone was not enough:
+    // packs arrive through ngit's remote helper, which only the umask reaches,
+    // so the fetch runs under 022 and anything still unreadable is repaired.
     await run("git", ["-C", config.mirrorDir, "config", "core.sharedRepository", "0644"]);
-    await run("git", ["-C", config.mirrorDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], { timeoutMs: 10 * 60_000 });
+    await run("git", ["-C", config.mirrorDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], { timeoutMs: 10 * 60_000, umask: "022" });
+    await run("chmod", ["-R", "a+rX", `${config.mirrorDir}/.git/objects`]);
     const branch = config.defaultBranch;
     await run("git", ["-C", config.mirrorDir, "update-ref", `refs/heads/${branch}`, `refs/remotes/origin/${branch}`]);
     return (await run("git", ["-C", config.mirrorDir, "rev-parse", `refs/heads/${branch}`])).stdout.trim();
@@ -238,7 +242,7 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
   return { report, sessionId, costUsd };
 }
 
-async function readReport(task: Task): Promise<Report | undefined> {
+export async function readReport(task: Task): Promise<Report | undefined> {
   try {
     // As the worker: a report.json symlinked at one of our files must not be read as us.
     const text = await readAsWorker(`${checkoutOf(task)}/.shipwright/report.json`);

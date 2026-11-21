@@ -5,7 +5,8 @@ import { rename, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { config } from "./config.ts";
 
-export type TaskStatus = "queued" | "running" | "publishing" | "needs_info" | "done" | "failed" | "cancelled" | "declined";
+/** "republish": the agent's work is done; only the publishing is to be redone. */
+export type TaskStatus = "republish" | "queued" | "running" | "publishing" | "needs_info" | "done" | "failed" | "cancelled" | "declined";
 
 export interface SourceRef {
   channel: string;
@@ -117,7 +118,7 @@ export class TaskStore {
   }
 
   active(): Task[] {
-    return this.tasks.filter((t) => ["queued", "running", "publishing", "needs_info"].includes(t.status));
+    return this.tasks.filter((t) => ["queued", "republish", "running", "publishing", "needs_info"].includes(t.status));
   }
 
   recent(limit = 12): Task[] {
