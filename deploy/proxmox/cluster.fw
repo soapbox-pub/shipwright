@@ -1,0 +1,6 @@
+# Datacenter firewall on only for guests that opt in with their own rules
+# (CT 134). Host firewall is disabled in nodes/saturn/host.fw.
+[OPTIONS]
+enable: 1
+policy_in: ACCEPT
+policy_out: ACCEPT

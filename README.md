@@ -66,8 +66,15 @@ Anyone in the community can steer an Opus agent with a shell. So:
 - **The Claude credential never reaches a worker.** The CLI talks to a
   loopback proxy (`src/authproxy.ts`) with a random per-task token, valid only
   while that task runs; the proxy swaps in the real one.
-- **No LAN.** nftables (`deploy/shipwright.nft`) rejects the worker's traffic
-  to private ranges, except DNS. It still has the internet, for npm.
+- **No LAN.** The Proxmox firewall on the container's NIC
+  (`deploy/proxmox/`) rejects everything the container sends to private
+  ranges, CGNAT, link-local and the house's public IP (hairpin NAT reaches
+  its port forwards), except DNS to the router. It also blocks all IPv6
+  except neighbour discovery, so turning on IPv6 later can't open a path to
+  the LAN. That firewall runs on the Proxmox host, so root inside the
+  container can't turn it off. Inside, nftables (`deploy/shipwright.nft`)
+  does the same for the worker user, as a second layer. The internet stays
+  open, for npm.
 - **Workers can't publish.** Signing (PRs, nsites, Blossom) happens in the
   service, from files the worker left. Artifact paths outside `.shipwright/`
   are refused.

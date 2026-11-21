@@ -1,0 +1,4 @@
+# saturn itself stays unfiltered: the datacenter firewall is on only so
+# guests with their own rules (CT 134, Shipwright) get them.
+[OPTIONS]
+enable: 0

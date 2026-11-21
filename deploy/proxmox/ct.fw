@@ -1,0 +1,30 @@
+# Shipwright runs AI agents steered by anyone in an Armada community.
+# Internet yes (npm, relays, Blossom); the house no. Enforced here, outside
+# the container, so root inside it cannot turn it off.
+[OPTIONS]
+enable: 1
+dhcp: 1
+ndp: 1
+macfilter: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[IPSET private] # LAN, CGNAT, link-local, multicast, and the house public IP (hairpin NAT reaches port forwards)
+0.0.0.0/8
+10.0.0.0/8
+100.64.0.0/10
+169.254.0.0/16
+172.16.0.0/12
+192.0.0.0/24
+192.168.0.0/16
+198.18.0.0/15
+224.0.0.0/3
+162.230.33.62 # the house public IP as of 2026-11-20; update if it changes
+
+[RULES]
+IN ACCEPT -source 192.168.1.0/24 -p tcp -dport 22 -log nolog # ssh, for deploys
+IN ACCEPT -p icmp -log nolog
+OUT ACCEPT -dest 192.168.1.1 -p udp -dport 53 -log nolog # DNS via the router only
+OUT ACCEPT -dest 192.168.1.1 -p tcp -dport 53 -log nolog
+OUT REJECT -dest +private -log nolog # nothing else on the LAN, saturn included
+OUT REJECT -dest ::/0 -log nolog # no IPv6 (neighbour discovery is allowed by ndp above), so a future IPv6 LAN is not reachable
