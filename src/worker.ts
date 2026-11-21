@@ -76,6 +76,12 @@ export async function prepareCheckout(task: Task, base: string): Promise<void> {
   // base. A half-made checkout holds no work yet, so it is rebuilt.
   const marker = `${dir}/.git/shipwright-prepared`;
   if (existsSync(marker)) return;
+  // Never once an agent has worked here: its edits are in this directory.
+  // (Checkouts from before the marker existed were wiped this way.)
+  if (task.sessionId && existsSync(`${dir}/.git`)) {
+    await runAsWorker("touch", [marker]);
+    return;
+  }
   if (existsSync(dir)) {
     log.warn(`[${task.id}] rebuilding a checkout that was never finished`);
     await runAsWorker("rm", ["-rf", dir]);
