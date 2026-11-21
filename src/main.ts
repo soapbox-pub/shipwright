@@ -73,8 +73,8 @@ io.on("ready", async (ready: Ready) => {
 
 /**
  * Messages that arrived while we were down. Only the ones addressed to us:
- * a request or a reply deserves an answer, however late, but offering to
- * build something from hours-old ambient chatter would be noise.
+ * a request or a reply deserves an answer, however late, but starting work
+ * from hours-old ambient chatter would revive conversations that moved on.
  */
 function catchUp(missed: Msg[]): void {
   missed.sort((a, b) => a.ms - b.ms);

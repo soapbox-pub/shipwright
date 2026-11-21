@@ -84,8 +84,9 @@ export class Runner {
         return;
       }
       if (report.status === "declined") {
+        // Silent: the only thing people hear about a task is its pull request.
         this.tasks.update(task, { status: "declined", error: report.reason });
-        await this.#say(task, `I'm not going to make #${task.id}: ${report.chat_summary ?? report.reason ?? "it's outside what I can do."}`);
+        log.info(`[${task.id}] declined: ${report.reason ?? report.chat_summary}`);
         return;
       }
 
@@ -111,15 +112,15 @@ export class Runner {
         previewUrl ? `🔎 Try it: ${previewUrl}` : "",
         task.prUrl ? `🔀 Pull request: ${task.prUrl}` : "",
         ...media.map((m) => m.url),
-        firstPr ? "\nA maintainer still has to review and merge it. Reply here if it's not quite right and I'll revise it." : "",
+        firstPr ? "\nReply here if it's not quite right and I'll revise it." : "",
       ];
       await this.#say(task, lines.filter(Boolean).join("\n"), media);
     } catch (err) {
       const message = (err as Error).message;
       log.error(`[${task.id}] failed: ${message}`);
       if ((task.status as string) === "cancelled") return;
+      // Silent too: a failure is for the maintainers, who have the logs.
       this.tasks.update(task, { status: "failed", error: message.slice(0, 2000) });
-      await this.#say(task, `⚠️ Something went wrong on my side and I couldn't finish #${task.id}. The maintainers can see what happened in my logs. Reply here to have me try again.`);
     }
   }
 

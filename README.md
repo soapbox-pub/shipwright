@@ -33,13 +33,15 @@ Armada community (Concord, E2EE)
    └─ auth proxy             the only holder of the Claude credential
 ```
 
-**When it speaks.** It always responds when mentioned (`nostr:npub…`, a `p` tag,
-or its name), replied to, or given a slash command (`/bug`, `/feature`,
-`/tasks`, published in its kind-10304 manifest). In watched channels
-(`SHIPWRIGHT_WATCH_CHANNELS`, `^armada$` here) it reads everything but only
-*offers* to build a clear bug report or request, and stays out of developer
-discussion. Anyone in the community can start work; caps are 20 tasks a day
-and 5 per person.
+**When it speaks.** Rarely. It reads mentions (`nostr:npub…`, a `p` tag, or its
+name), replies to it, slash commands (`/bug`, `/feature`, `/tasks`, published in
+its kind-10304 manifest), and every message in watched channels
+(`SHIPWRIGHT_WATCH_CHANNELS`). A concrete bug report or feature request that
+nobody has claimed starts a task silently; the one message about it is the
+reply with the pull request, preview and screenshots. Otherwise it only answers
+direct questions, and asks one when a request addressed to it is too vague to
+start. Failures and declined tasks are logged, not posted. Anyone in the
+community can start work; caps are 20 tasks a day and 5 per person.
 
 **Revisions.** Replying to any of Shipwright's messages about a task (or
 naming `#id`) reaches the coordinator, which resumes the same Opus session in
