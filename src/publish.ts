@@ -4,57 +4,76 @@
 // ever produced files.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { readFile, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { nip19 } from "nostr-tools";
 import { config } from "./config.ts";
+import { exportFromWorker, exportedFile, workerPath } from "./handoff.ts";
 import { log } from "./log.ts";
 import { type Signer, blossomUpload, nsiteUrl } from "./nostr.ts";
-import { run } from "./proc.ts";
+import { run, runAsWorker } from "./proc.ts";
 import type { Media, Task } from "./tasks.ts";
-import { checkoutOf, type Report } from "./worker.ts";
+import { HANDOFF, bundleCommits, checkoutOf, type Report } from "./worker.ts";
 
 const ngit = (args: string[], cwd?: string) =>
   run("ngit", ["--nsec-file", config.keyFile, ...args], { cwd, timeoutMs: 15 * 60_000 });
 
-/** Resolve a path the agent gave us, refusing anything outside its artifacts. */
+const MAX_MEDIA = 80 * 1024 * 1024;
+const MAX_SITE = 500 * 1024 * 1024;
+
+/** A path the agent gave us, refused unless it is lexically inside .shipwright/. */
 function artifact(task: Task, file: string): string | undefined {
-  const root = resolve(checkoutOf(task), ".shipwright");
-  const path = resolve(checkoutOf(task), file);
-  if (!path.startsWith(`${root}/`)) {
+  const rel = workerPath(file, ".shipwright");
+  if (!rel || rel === ".shipwright" || rel.startsWith(`${HANDOFF}/`)) {
     log.warn(`[${task.id}] ignoring artifact outside .shipwright: ${file}`);
     return undefined;
   }
-  return existsSync(path) ? path : undefined;
+  return rel;
+}
+
+/**
+ * WebM doesn't play in Safari; H.264 MP4 plays everywhere. ffmpeg runs as the
+ * worker, with the input format pinned: a ".webm" that is really an HLS or
+ * concat playlist would otherwise have ffmpeg read any file it names.
+ */
+async function toMp4(task: Task, rel: string, n: number): Promise<string | undefined> {
+  const dir = checkoutOf(task);
+  const out = `${HANDOFF}/video-${n}.mp4`;
+  try {
+    await runAsWorker("mkdir", ["-p", `${dir}/${HANDOFF}`]);
+    await runAsWorker(
+      "ffmpeg",
+      ["-y", "-loglevel", "error", "-protocol_whitelist", "file", "-f", "matroska", "-i", `${dir}/${rel}`, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", "-threads", "4", `${dir}/${out}`],
+      { timeoutMs: 10 * 60_000 },
+    );
+    return out;
+  } catch (err) {
+    log.warn(`[${task.id}] video conversion failed, uploading the webm: ${(err as Error).message}`);
+    return undefined;
+  }
 }
 
 export async function uploadMedia(task: Task, report: Report, signer: Signer): Promise<Media[]> {
   const out: Media[] = [];
   const items = [...(report.screenshots ?? []).slice(0, 8), ...(report.video ? [report.video] : [])];
-  for (const item of items) {
-    let path = artifact(task, item.file);
-    if (!path) continue;
-    if ((await stat(path)).size > 80 * 1024 * 1024) {
-      log.warn(`[${task.id}] skipping oversized artifact ${item.file}`);
-      continue;
-    }
-    // WebM doesn't play in Safari; H.264 MP4 plays everywhere.
-    if (path.endsWith(".webm")) {
-      const dir = await mkdtemp(join(tmpdir(), "sw-video-"));
-      const mp4 = join(dir, "video.mp4");
-      try {
-        await run("ffmpeg", ["-y", "-loglevel", "error", "-i", path, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", "-threads", "4", mp4], { timeoutMs: 10 * 60_000 });
-        path = mp4;
-      } catch (err) {
-        log.warn(`[${task.id}] video conversion failed, uploading the webm: ${(err as Error).message}`);
-      }
-    }
+  for (const [n, item] of items.entries()) {
+    let rel = artifact(task, item.file);
+    if (!rel) continue;
+    if (rel.endsWith(".webm")) rel = (await toMp4(task, rel, n)) ?? rel;
+    let copy: string | undefined;
     try {
+      copy = await exportFromWorker(checkoutOf(task), [rel], MAX_MEDIA);
+      const path = await exportedFile(copy, rel);
+      if (!path) {
+        log.warn(`[${task.id}] artifact is not a regular file: ${item.file}`);
+        continue;
+      }
       const blob = await blossomUpload(signer, path, config.blossomServers);
       out.push({ url: blob.url, sha256: blob.sha256, type: blob.type, caption: item.caption?.slice(0, 200) ?? "" });
     } catch (err) {
-      log.warn(`[${task.id}] media upload failed: ${(err as Error).message}`);
+      log.warn(`[${task.id}] media upload failed for ${item.file}: ${(err as Error).message}`);
+    } finally {
+      if (copy) await rm(copy, { recursive: true, force: true });
     }
   }
   return out;
@@ -66,9 +85,11 @@ export async function uploadMedia(task: Task, report: Report, signer: Signer): P
  * preview doesn't need anyway, so the build is staged without them.
  */
 export async function publishPreview(task: Task, dist: string, signer: Signer): Promise<string> {
-  const stage = await mkdtemp(join(tmpdir(), `sw-site-${task.id}-`));
+  // Copied out as the worker: a symlink in the build reaches only what the worker can read.
+  const copy = await exportFromWorker(checkoutOf(task), [dist], MAX_SITE);
+  const stage = join(copy, dist);
   try {
-    await cp(dist, stage, { recursive: true, dereference: false });
+    if (!existsSync(join(stage, "index.html"))) throw new Error("the build has no index.html");
     for (const file of await walk(stage)) {
       const name = file.split("/").pop() ?? "";
       if (!name.includes(".") || name.startsWith(".")) await rm(file);
@@ -95,10 +116,10 @@ export async function publishPreview(task: Task, dist: string, signer: Signer): 
       throw new Error(`nsite publish: ${res.stdout.slice(0, 500)}`);
     }
     const url = nsiteUrl(signer.pubkey, task.nsiteId, config.nsiteGateway);
-    await waitForSite(task, url, dist);
+    await waitForSite(task, url, stage);
     return url;
   } finally {
-    await rm(stage, { recursive: true, force: true });
+    await rm(copy, { recursive: true, force: true });
   }
 }
 
@@ -154,9 +175,19 @@ export function prDescription(task: Task, report: Report): string {
  * Open the PR, or add a revision to it. Runs in a worktree of the mirror so
  * ngit sees the nostr:// origin, the default branch, and our commits.
  */
-export async function openOrUpdatePr(task: Task, report: Report): Promise<{ eventId: string; url: string } | undefined> {
+export async function openOrUpdatePr(task: Task, report: Report, base: string): Promise<{ eventId: string; url: string } | undefined> {
   const ref = `refs/shipwright/${task.id}`;
-  await run("git", ["-C", config.mirrorDir, "fetch", "--no-tags", checkoutOf(task), `+HEAD:${ref}`]);
+  // Never fetch from the checkout itself (git would run in a repository the
+  // agent configured); take a bundle the worker wrote, which is only data.
+  const bundle = await bundleCommits(task, base);
+  const copy = await exportFromWorker(checkoutOf(task), [bundle], MAX_SITE);
+  try {
+    const file = await exportedFile(copy, bundle);
+    if (!file) throw new Error("the worker's bundle is missing");
+    await run("git", ["-C", config.mirrorDir, "fetch", "--no-tags", file, `+HEAD:${ref}`]);
+  } finally {
+    await rm(copy, { recursive: true, force: true });
+  }
   const wt = `${config.publishDir}/${task.id}`;
   if (!existsSync(wt)) {
     await run("git", ["-C", config.mirrorDir, "worktree", "add", "--detach", wt, ref]);

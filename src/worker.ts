@@ -2,11 +2,11 @@
 // shipwright-worker, reaching the model only through the auth proxy.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { query, type SDKMessage, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { AuthProxy } from "./authproxy.ts";
 import { config } from "./config.ts";
 import { recordCost } from "./costs.ts";
+import { readAsWorker } from "./handoff.ts";
 import { log } from "./log.ts";
 import { run, runAsWorker, workerCommand } from "./proc.ts";
 import type { Task } from "./tasks.ts";
@@ -240,7 +240,10 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
 
 async function readReport(task: Task): Promise<Report | undefined> {
   try {
-    const report = JSON.parse(await readFile(`${checkoutOf(task)}/.shipwright/report.json`, "utf8")) as Report;
+    // As the worker: a report.json symlinked at one of our files must not be read as us.
+    const text = await readAsWorker(`${checkoutOf(task)}/.shipwright/report.json`);
+    if (text === undefined) return undefined;
+    const report = JSON.parse(text) as Report;
     if (!["done", "needs_info", "declined"].includes(report.status)) return undefined;
     return report;
   } catch {
@@ -248,19 +251,37 @@ async function readReport(task: Task): Promise<Report | undefined> {
   }
 }
 
-/** What the agent left: commits on the branch, and a clean tree. */
+/**
+ * What the agent left: commits on the branch, and a clean tree. Git runs as
+ * the worker: the agent controls this repository's config, and core.fsmonitor
+ * alone would run any command it liked as whoever ran `git status` here.
+ */
 export async function inspectCheckout(task: Task, base: string): Promise<{ commits: number; dirty: string }> {
   const dir = checkoutOf(task);
-  const count = await run("git", ["-C", dir, "rev-list", "--count", `${base}..HEAD`]);
-  const status = await run("git", ["-C", dir, "status", "--porcelain"]);
+  const count = await runAsWorker("git", ["-C", dir, "rev-list", "--count", `${base}..HEAD`]);
+  const status = await runAsWorker("git", ["-C", dir, "status", "--porcelain"]);
   return { commits: Number(count.stdout.trim()), dirty: status.stdout.trim() };
 }
 
-/** The production build, for the preview site. */
-export async function buildPreview(task: Task): Promise<string> {
+/** Where the service's handoffs (bundle, converted video) are written, as the worker. */
+export const HANDOFF = ".shipwright/handoff";
+
+/**
+ * The branch as a git bundle, written by the worker. The service fetches
+ * from the bundle, which is only data, never from the checkout itself.
+ */
+export async function bundleCommits(task: Task, base: string): Promise<string> {
   const dir = checkoutOf(task);
-  await runAsWorker("npm", ["run", "build"], { cwd: dir, timeoutMs: 20 * 60_000 });
-  return `${dir}/dist`;
+  const rel = `${HANDOFF}/branch.bundle`;
+  await runAsWorker("mkdir", ["-p", `${dir}/${HANDOFF}`]);
+  await runAsWorker("git", ["-C", dir, "bundle", "create", rel, `${base}..HEAD`], { timeoutMs: 10 * 60_000 });
+  return rel;
+}
+
+/** The production build, for the preview site: `dist` in the checkout. */
+export async function buildPreview(task: Task): Promise<string> {
+  await runAsWorker("npm", ["run", "build"], { cwd: checkoutOf(task), timeoutMs: 20 * 60_000 });
+  return "dist";
 }
 
 export async function removeCheckout(task: Task): Promise<void> {

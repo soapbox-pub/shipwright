@@ -34,6 +34,8 @@ chmod -R a+rX "$new"
 install -m 0755 "$new/deploy/as-worker" /opt/shipwright/libexec/as-worker
 install -m 0644 "$new/deploy/shipwright.service" /etc/systemd/system/shipwright.service
 systemctl daemon-reload
+# Older provisions trusted every repository for the service; see provision.sh.
+sudo -u shipwright git config --global --unset-all safe.directory || true
 rm -rf /opt/shipwright/app.old
 [ -d /opt/shipwright/app ] && mv /opt/shipwright/app /opt/shipwright/app.old
 mv "$new" /opt/shipwright/app

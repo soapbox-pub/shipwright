@@ -71,6 +71,13 @@ Anyone in the community can steer an Opus agent with a shell. So:
 - **Workers can't publish.** Signing (PRs, nsites, Blossom) happens in the
   service, from files the worker left. Artifact paths outside `.shipwright/`
   are refused.
+- **The service never reads a checkout as itself** (`src/handoff.ts`). A
+  checkout can hold symlinks to the secrets or a `.git/config` that runs
+  commands. So the worker's own `tar` packs what's published, and the
+  service unpacks it into a private directory, keeping only regular files.
+  The branch arrives as a git bundle, and git and ffmpeg run as the worker.
+  The service has no `safe.directory`, so git won't run in a worker's repo
+  for it even by mistake.
 - **The coordinator has no built-in tools**, only reply/react/start/revise/
   cancel, so an injection in chat can at worst say something or queue a
   task, which the caps bound.

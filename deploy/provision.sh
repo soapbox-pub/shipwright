@@ -67,7 +67,10 @@ EOF
 chmod 0440 /etc/sudoers.d/shipwright
 visudo -cf /etc/sudoers.d/shipwright
 
-sudo -u shipwright git config --global --replace-all safe.directory '*'
+# No safe.directory for the service: git's ownership check is what stops it
+# running a worker-owned repository's config (core.fsmonitor and friends).
+# It only runs git in its own repositories; worker checkouts reach it as bundles.
+sudo -u shipwright git config --global --unset-all safe.directory || true
 sudo -u shipwright git config --global user.name Shipwright
 sudo -u shipwright git config --global user.email shipwright@nostr.invalid
 sudo -u shipwright-worker git config --global user.name Shipwright

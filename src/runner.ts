@@ -102,7 +102,7 @@ export class Runner {
       });
       const media = await uploadMedia(task, report, this.signer);
       this.tasks.update(task, { previewUrl, media });
-      const pr = await openOrUpdatePr(task, report);
+      const pr = await openOrUpdatePr(task, report, base);
       const firstPr = !task.prEventId;
       this.tasks.update(task, { status: "done", prEventId: pr?.eventId ?? task.prEventId, prUrl: pr?.url ?? task.prUrl, revision: task.revision + 1 });
 
