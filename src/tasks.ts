@@ -58,6 +58,12 @@ export interface Task {
   media: Media[];
   question?: string;
   error?: string;
+  /**
+   * Maintainers' review comments on the PR waiting for an answer there.
+   * `given`: the agent has them in its current round, so the PR reply
+   * goes out when that round finishes.
+   */
+  reviews?: { id: string; pubkey: string; given?: boolean }[];
   /** Our chat messages about this task, so replies to them route back to it. */
   messageIds: string[];
   /** Rough cost the Agent SDK reports (subscription usage, not a bill). */

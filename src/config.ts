@@ -16,6 +16,8 @@ export const config = {
 
   // ── The repository Shipwright works on ──
   repo: env("SHIPWRIGHT_REPO", "nostr://soapbox.pub/relay.ngit.dev/armada"),
+  /** The repo owner's hex pubkey; by default resolved from `repo` (npub or NIP-05). */
+  repoOwner: process.env.SHIPWRIGHT_REPO_OWNER?.trim(),
   repoWeb: env("SHIPWRIGHT_REPO_WEB", "https://gitworkshop.dev/soapbox.pub/relay.ngit.dev/armada"),
   defaultBranch: env("SHIPWRIGHT_DEFAULT_BRANCH", "main"),
   mirrorDir: env("SHIPWRIGHT_MIRROR_DIR", "/var/lib/shipwright/repos/armada"),

@@ -30,6 +30,7 @@ Armada community (Concord, E2EE)
    │    ├─ preview           npm run build → named nsite sw-<task> → nsite.run
    │    ├─ media             screenshots/video (webm → mp4) → Blossom
    │    └─ PR                ngit send (revisions: --in-reply-to the first one)
+   ├─ review watcher         maintainers' comments on its PRs (NIP-22, kind 1111)
    └─ auth proxy             the only holder of the Claude credential
 ```
 
@@ -47,6 +48,17 @@ community can start work; caps are 20 tasks a day and 5 per person.
 naming `#id`) reaches the coordinator, which resumes the same Opus session in
 the same checkout. New commits go up as a revision of the same PR, and the
 preview at the same address updates.
+
+**Code review.** Shipwright reads the comments on its pull requests, but only
+from the repository's maintainers: the owner and everyone the `maintainers`
+tags of the repo announcements (kind 30617) list. Nobody else's comments are
+read. A maintainer's comments (a few in a row count as one review) go to the
+coordinator, which hands any change request or question to the task's Opus
+session without saying anything. The one reply, on the PR in reply to the
+maintainer, comes when the work is done: what changed, with the new revision
+and preview, or just the answer when a question needed no change. Approval
+and maintainers talking among themselves get nothing. Merged and closed PRs
+are left alone, and none of this is posted in the community.
 
 **Self-management.** On every boot it re-asserts its kind 0, relay list
 (10002), Blossom list (10063) and bot command manifest (10304), uploads its
@@ -87,7 +99,8 @@ Anyone in the community can steer an Opus agent with a shell. So:
   for it even by mistake.
 - **The coordinator has no built-in tools**, only reply/react/start/revise/
   cancel, so an injection in chat can at worst say something or queue a
-  task, which the caps bound.
+  task, which the caps bound. Reviewing, it has one: hand the comments to
+  the task's agent.
 
 Every PR still needs a maintainer to review and merge it.
 
@@ -109,7 +122,7 @@ Files on the server:
 | `/var/lib/shipwright/secrets/nsec` | Shipwright's key |
 | `/var/lib/shipwright/secrets/claude-token` | `claude setup-token` output (a Claude subscription token, valid for a year) |
 | `/etc/shipwright/env` | overrides for anything in `src/config.ts` |
-| `/var/lib/shipwright/state/` | tasks, chat memory, Concord membership |
+| `/var/lib/shipwright/state/` | tasks, chat memory, Concord membership, review comments seen |
 | `/var/lib/shipwright/repos/armada` | mirror of Armada; `repos/publish/<id>` are the PR worktrees |
 | `/srv/shipwright/work/<id>` | each task's checkout (owned by the worker) |
 

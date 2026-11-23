@@ -8,6 +8,7 @@ import { config } from "./config.ts";
 import { Coordinator, type Mode } from "./coordinator.ts";
 import { assertIdentity, ensureAvatar, loadOrCreateKey } from "./identity.ts";
 import { log } from "./log.ts";
+import { ReviewWatcher } from "./review.ts";
 import { Runner } from "./runner.ts";
 import { TaskStore } from "./tasks.ts";
 
@@ -41,6 +42,9 @@ chat.self = signer.pubkey;
 chat.relays = config.appRelays;
 const runner = new Runner({ tasks, chat, proxy, signer });
 const coordinator = new Coordinator({ chat, tasks, runner, proxy });
+// Maintainers' comments on our pull requests, over plain Nostr, independent of the community.
+const review = new ReviewWatcher({ tasks, coordinator, self: signer.pubkey });
+void review.start().catch((err) => log.warn(`review: ${err.message}`));
 
 // Say who we are before the community first sees us join.
 const avatar = await ensureAvatar(signer);

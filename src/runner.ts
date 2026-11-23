@@ -6,6 +6,7 @@ import { config } from "./config.ts";
 import { log } from "./log.ts";
 import type { Signer } from "./nostr.ts";
 import { openOrUpdatePr, publishPreview, removePublishWorktree, uploadMedia } from "./publish.ts";
+import { replyOnPr } from "./review.ts";
 import type { Task, TaskStore } from "./tasks.ts";
 import { buildPreview, inspectCheckout, prepareCheckout, readReport, refreshMirror, removeCheckout, runAgent, type Report } from "./worker.ts";
 
@@ -46,11 +47,13 @@ export class Runner {
     return this.tasks.tasks.filter((t) => t.status === "queued" && t.updatedAt <= task.updatedAt).length;
   }
 
-  revise(task: Task, text: string, announce: boolean): void {
+  /** `review`: a maintainer's comment on the PR, answered there when the round is done. */
+  revise(task: Task, text: string, announce: boolean, review?: { id: string; pubkey: string }): void {
     // A running task keeps running; it picks this up in another round when
     // the current one ends (see #execute).
     const status = this.#running.has(task.id) ? task.status : "queued";
-    this.tasks.update(task, { pending: [...task.pending, text], status, question: undefined, error: undefined, announce: announce || task.announce || !task.prEventId });
+    const reviews = review ? [...(task.reviews ?? []), review] : task.reviews;
+    this.tasks.update(task, { pending: [...task.pending, text], status, question: undefined, error: undefined, announce: announce || task.announce || !task.prEventId, reviews, swept: false });
     this.kick();
   }
 
@@ -78,7 +81,7 @@ export class Runner {
       log.info(`[${task.id}] agent starting (${task.interrupted ? "resuming after a restart" : task.sessionId ? "resumed" : "new"}, slot ${slot})`);
       // Everything pending now goes to the agent; what arrives later waits.
       const given = task.interrupted ? (task.delivered ?? 0) : 0;
-      this.tasks.update(task, { delivered: task.pending.length });
+      this.tasks.update(task, { delivered: task.pending.length, reviews: task.reviews?.map((r) => ({ ...r, given: true })) });
       const outcome = await runAgent(task, this.proxy, config.devPortBase + slot, abort, (sessionId) => this.tasks.update(task, { sessionId }), given);
       this.tasks.update(task, {
         sessionId: outcome.sessionId,
@@ -93,7 +96,15 @@ export class Runner {
 
       if (report.status === "needs_info") {
         this.tasks.update(task, { status: "needs_info", question: report.question });
+        // A maintainer's review is answered where they asked.
+        if (await this.#answerReview(task, report.review_reply || report.question)) return;
         await this.#say(task, `Quick question first: ${report.question ?? report.chat_summary ?? "could you say a bit more?"}`);
+        return;
+      }
+      if (report.status === "answered") {
+        // A question from review that needed no change: just the answer, on the PR.
+        this.tasks.update(task, { status: task.prEventId ? "done" : "failed" });
+        await this.#answerReview(task, report.review_reply || report.chat_summary);
         return;
       }
       if (report.status === "declined") {
@@ -158,6 +169,9 @@ export class Runner {
       const pr = await openOrUpdatePr(task, report, base);
       const announce = task.announce ?? true;
       this.tasks.update(task, { status: "done", prEventId: pr?.eventId ?? task.prEventId, prUrl: pr?.url ?? task.prUrl, revision: task.revision + 1, announce: false });
+      const preview = previewUrl ? `\n\n[Preview](${previewUrl})` : "";
+      const answer = report.review_reply?.trim() || report.chat_summary?.trim();
+      await this.#answerReview(task, answer && `${answer}${preview}`);
       if (!announce) {
         log.info(`[${task.id}] revised quietly (nobody asked Shipwright for it directly)`);
         return;
@@ -168,6 +182,28 @@ export class Runner {
       const summary = report.chat_summary?.trim() || (task.revision > 1 ? "Updated." : "Done.");
       await this.#say(task, `${summary} ${links}`.trim());
     }
+  }
+
+  /**
+   * Reply on the PR to the maintainers' comments this round worked on: one
+   * comment, in reply to the latest. Comments that came in mid-round wait
+   * for a round of their own. False if there was nothing to answer.
+   */
+  async #answerReview(task: Task, text: string | undefined): Promise<boolean> {
+    const given = (task.reviews ?? []).filter((r) => r.given);
+    if (!given.length) return false;
+    this.tasks.update(task, { reviews: (task.reviews ?? []).filter((r) => !r.given) });
+    if (!text?.trim()) {
+      log.warn(`[${task.id}] the agent left no reply for the review`);
+      return true;
+    }
+    try {
+      await replyOnPr(this.signer, task, given.at(-1) as { id: string; pubkey: string }, text.trim());
+      log.info(`[${task.id}] replied to the review on the pull request`);
+    } catch (err) {
+      log.warn(`[${task.id}] could not reply on the pull request: ${(err as Error).message}`);
+    }
+    return true;
   }
 
   /** Delete checkouts of tasks finished more than a week ago. */

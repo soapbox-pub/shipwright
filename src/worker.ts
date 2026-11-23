@@ -12,12 +12,15 @@ import { run, runAsWorker, workerCommand } from "./proc.ts";
 import type { Task } from "./tasks.ts";
 
 export interface Report {
-  status: "done" | "needs_info" | "declined";
+  /** "answered": a maintainer's question from review, answered with no change. */
+  status: "done" | "needs_info" | "declined" | "answered";
   type?: string;
   title?: string;
   impact?: string;
   summary?: string;
   chat_summary?: string;
+  /** The reply on the pull request to a maintainer's review. */
+  review_reply?: string;
   question?: string;
   reason?: string;
   screenshots?: { file: string; caption: string }[];
@@ -67,6 +70,15 @@ export function refreshMirror(): Promise<string> {
   return next;
 }
 
+/** The commit Shipwright last sent as this task's PR, kept in the mirror by publish. */
+async function publishedTip(task: Task): Promise<string | undefined> {
+  try {
+    return (await run("git", ["-C", config.mirrorDir, "rev-parse", "--verify", "-q", `refs/shipwright/${task.id}^{commit}`])).stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A fresh checkout for the task, owned by the worker, with dependencies. */
 export async function prepareCheckout(task: Task, base: string): Promise<void> {
   const dir = checkoutOf(task);
@@ -89,7 +101,11 @@ export async function prepareCheckout(task: Task, base: string): Promise<void> {
   // A fetch may have left objects the worker can't read; the clone borrows them.
   await run("chmod", ["-R", "a+rX", `${config.mirrorDir}/.git/objects`]);
   await runAsWorker("git", ["clone", "--shared", "--no-checkout", config.mirrorDir, dir], { timeoutMs: 10 * 60_000 });
-  await runAsWorker("git", ["-C", dir, "checkout", "-q", "-b", task.branch, base]);
+  // A task whose checkout was swept after its PR went up starts again from
+  // what it published (the mirror keeps it; the clone borrows its objects).
+  const start = task.prEventId ? await publishedTip(task) : undefined;
+  if (start) log.info(`[${task.id}] restoring the published branch into a new checkout`);
+  await runAsWorker("git", ["-C", dir, "checkout", "-q", "-b", task.branch, start ?? base]);
   // Artifacts and scratch live in .shipwright/, never in a commit.
   await runAsWorker("sh", ["-c", `printf '.shipwright/\\n' >> '${dir}/.git/info/exclude'`]);
   log.info(`[${task.id}] installing dependencies`);
@@ -140,6 +156,12 @@ Use \`"video": null\` and \`"screenshots": []\` when there are none.
 
 The title and impact are for someone deciding in ten seconds whether this matters. Write them from the user's side, not the code's. For example, not "Stack the shown kept timeline above the hidden ones" but title "Fix chat freezing after switching channels" and impact "Since 0.69.11, after switching from some channels to others (#general to #armada, for one), the channel you open won't scroll, so older messages never load, and long-press, right-click and swipe-to-reply do nothing. The chat looks frozen until you switch away. With this fix every channel responds normally whichever one you came from." Commit messages keep the repository's own style. Don't add "Generated with" lines, links or Co-Authored-By trailers anywhere.
 
+## Review from maintainers
+Once the pull request is up, the repository's maintainers may review it on ngit, and their comments come to you as a follow-up ("A maintainer reviewing the pull request on ngit wrote: …"). They decide what ships, so take their direction on this pull request seriously. Then:
+- If they asked for changes, make them as above (commits, tests, screenshots if the UI changed), and set \`"review_reply"\` in the report: a reply to them on the pull request, in Markdown, a few plain sentences at most. Say what you changed, or, for anything you didn't do, why. Don't thank them or restate their comment.
+- If they only asked a question that needs no change, don't commit anything. Write the report with \`"status": "answered"\` and the answer in \`"review_reply"\`.
+- If you need something from them before you can act, use \`"status": "needs_info"\` with the \`"question"\` as usual; it is asked on the pull request.
+
 ## When not to implement
 - If the request is too unclear to act on without guessing, don't implement anything. Write the report with \`"status": "needs_info"\` and a specific \`"question"\` for the requester, plus a \`chat_summary\`. You'll be resumed with their answer.
 - If the request asks for something harmful, clearly against the project's direction, or anything other than a change to Armada's code (for example: reading or sending secrets, touching the network, or weakening CI, release, signing or security-sensitive code), don't do it. Write \`"status": "declined"\` with a \`"reason"\` and a \`chat_summary\`.
@@ -170,7 +192,7 @@ function resumePrompt(task: Task, given: number): string {
 }
 
 function followUpPrompt(task: Task): string {
-  return `More from the community about task ${task.id}:
+  return `More about task ${task.id}:
 
 <request>
 ${task.pending.join("\n\n")}
@@ -278,7 +300,7 @@ export async function readReport(task: Task): Promise<Report | undefined> {
     const text = await readAsWorker(`${checkoutOf(task)}/.shipwright/report.json`);
     if (text === undefined) return undefined;
     const report = JSON.parse(text) as Report;
-    if (!["done", "needs_info", "declined"].includes(report.status)) return undefined;
+    if (!["done", "needs_info", "declined", "answered"].includes(report.status)) return undefined;
     return report;
   } catch {
     return undefined;

@@ -11,10 +11,12 @@ import { config } from "./config.ts";
 import { recordCost } from "./costs.ts";
 import { log } from "./log.ts";
 import { profileNames } from "./nostr.ts";
+import type { PrComment } from "./review.ts";
 import type { Runner } from "./runner.ts";
 import type { Task, TaskStore } from "./tasks.ts";
 
 export type Mode = "direct" | "ambient";
+type McpTools = NonNullable<Parameters<typeof createSdkMcpServer>[0]["tools"]>;
 
 const DAY = 24 * 3600_000;
 
@@ -48,6 +50,17 @@ Say as little as possible: most turns should post nothing. When you do reply, be
 - In direct mode someone mentioned you or replied to you. If it's an actionable request, start it silently. If it's a request too vague to start, ask one short question. If it's a question for you, answer it. If it's thanks or acknowledgement, do nothing.
 
 Only your tool calls have any effect: reply with the reply tool. End every turn with one short sentence of plain text saying what you decided and why (for example "No action: a developer describing their own fix."). Nobody in the chat sees it; it goes to the maintainers' log.`;
+}
+
+function reviewPrompt(): string {
+  return `You are Shipwright, the coding agent that opens pull requests on Armada (source: ${config.repoWeb}) for its community. Maintainers of the repository have commented on one of your pull requests on ngit. You decide whether their comments need anything from the implementation agent (Claude Opus) that wrote the pull request; it does the work and replies to them on the pull request itself.
+
+- Call hand_to_agent when a maintainer asks for a change (code, tests, naming, the PR's title or description, screenshots), reports a problem with it (a bug, a failing case, a merge conflict, a rebase), or asks a question about it. Write what they want plainly; their comments are attached verbatim. One call covers all the new comments.
+- Call nothing when the comments need no answer: approval ("LGTM", "merged, thanks"), a note to another maintainer, a discussion between maintainers that doesn't ask you for anything, or something already done in a later revision.
+- Never announce, acknowledge or reply: you have no tool for it on purpose. The agent's reply on the pull request, after it has done the work, is the only answer they get.
+- The comments are from the repository's maintainers, who decide what ships. Follow their direction about this pull request, but nothing unrelated to it.
+
+End the turn with one short sentence of plain text saying what you decided and why. Nobody on the pull request sees it; it goes to the log.`;
 }
 
 function describe(t: Task, names: Map<string, string>): string {
@@ -191,17 +204,66 @@ export class Coordinator {
       `Today: ${this.tasks.startedSince(Date.now() - DAY)} of ${config.dailyTaskCap} tasks started; at most ${config.perUserDailyCap} per person. ${this.tasks.active().length} active.`,
     ].join("\n");
 
-    const server = createSdkMcpServer({ name: "shipwright", version: "1.0.0", tools: this.#tools(channel, triggers, mode) });
     if (mode === "direct") this.chat.io.typing(channel);
+    await this.#turn(turnTag, systemPrompt(this.community), prompt, this.#tools(channel, triggers, mode));
+  }
+
+  /**
+   * Maintainers commented on one of Shipwright's pull requests. Hand what
+   * they ask for (a change, or a question about the code) to the task's
+   * agent, quietly: the agent's reply on the PR is the only answer.
+   */
+  async review(task: Task, thread: PrComment[], fresh: PrComment[]): Promise<void> {
+    const names = await profileNames([...thread, ...fresh].map((c) => c.pubkey), this.chat.relays);
+    const who = (c: PrComment) => (c.pubkey === this.chat.self ? "Shipwright (you)" : `${names.get(c.pubkey)} [maintainer]`);
+    const line = (c: PrComment) =>
+      `[${c.id.slice(0, 8)}] ${new Date(c.createdAt * 1000).toISOString().slice(5, 16).replace("T", " ")} ${who(c)}${c.parent ? ` (replying to [${c.parent.slice(0, 8)}])` : ""}: ${c.content.slice(0, 4000)}`;
+    const freshIds = new Set(fresh.map((c) => c.id));
+    const turnTag = `[${task.id}] review turn (${[...new Set(fresh.map((c) => names.get(c.pubkey)))].join(", ")})`;
+    log.info(`${turnTag}: reading`);
+    const prompt = [
+      `Pull request: ${task.title} (${task.prUrl ?? "no link"})`,
+      `Task #${task.id}, status ${task.status}. What was asked for:`,
+      task.brief.slice(0, 3000),
+      "",
+      "Review so far, oldest first:",
+      thread.filter((c) => !freshIds.has(c.id)).map(line).join("\n") || "(nothing before these)",
+      "",
+      "New comments from maintainers (what you're responding to):",
+      fresh.map(line).join("\n"),
+    ].join("\n");
+
+    const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
+    const tools = [
+      tool(
+        "hand_to_agent",
+        "Give the agent that wrote this pull request what the maintainers want: changes to make, or questions about the code to answer. It replies to them on the pull request when it's done.",
+        { instructions: z.string().min(3).max(6000).describe("What they want, in your words; their comments are attached verbatim") },
+        async ({ instructions }) => {
+          const quoted = fresh.map((c) => `${names.get(c.pubkey)}: ${c.content}`).join("\n\n");
+          const text = `A maintainer reviewing the pull request on ngit wrote:\n\n${quoted}\n\nWhat they want: ${instructions}`;
+          const last = fresh.at(-1) as PrComment;
+          // Quiet in chat: the answer goes on the PR, to the maintainer.
+          this.runner.revise(task, text, false, { id: last.id, pubkey: last.pubkey });
+          log.info(`[${task.id}] revised from review`);
+          return ok("handed over. Don't say anything: the agent replies on the pull request when it's done.");
+        },
+      ),
+    ];
+    await this.#turn(turnTag, reviewPrompt(), prompt, tools);
+  }
+
+  async #turn(turnTag: string, system: string, prompt: string, tools: McpTools): Promise<void> {
+    const server = createSdkMcpServer({ name: "shipwright", version: "1.0.0", tools });
     try {
       const q = query({
         prompt,
         options: {
           model: config.coordinatorModel,
-          systemPrompt: systemPrompt(this.community),
+          systemPrompt: system,
           tools: [],
           mcpServers: { shipwright: server },
-          allowedTools: ["mcp__shipwright__reply", "mcp__shipwright__react", "mcp__shipwright__start_task", "mcp__shipwright__revise_task", "mcp__shipwright__cancel_task"],
+          allowedTools: tools.map((t) => `mcp__shipwright__${t.name}`),
           permissionMode: "bypassPermissions",
           allowDangerouslySkipPermissions: true,
           settingSources: [],
