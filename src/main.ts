@@ -10,6 +10,7 @@ import { assertIdentity, ensureAvatar, loadOrCreateKey } from "./identity.ts";
 import { log } from "./log.ts";
 import { ReviewWatcher } from "./review.ts";
 import { Runner } from "./runner.ts";
+import { assertSandbox } from "./sandbox.ts";
 import { TaskStore } from "./tasks.ts";
 
 /** Batching: a quick turn when addressed, a lull (with a cap) when overheard. */
@@ -27,6 +28,8 @@ mkdirSync(config.stateDir, { recursive: true });
 // The CLI refuses to edit tasks while this runs: the service holds them in
 // memory and would write its copy over the CLI's.
 writeFileSync(`${config.stateDir}/service.pid`, String(process.pid));
+// No agent runs (and no task resumes) unless the sandbox holds.
+await assertSandbox();
 const signer = await loadOrCreateKey();
 log.info(`I am ${signer.npub}`);
 

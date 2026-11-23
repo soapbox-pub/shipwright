@@ -8,7 +8,7 @@ import { config } from "./config.ts";
 import { recordCost } from "./costs.ts";
 import { readAsWorker } from "./handoff.ts";
 import { log } from "./log.ts";
-import { run, runAsWorker, workerCommand } from "./proc.ts";
+import { removeWorkerFiles, run, runAsWorker, workerCommand } from "./proc.ts";
 import type { Task } from "./tasks.ts";
 
 export interface Report {
@@ -91,29 +91,33 @@ export async function prepareCheckout(task: Task, base: string): Promise<void> {
   // Never once an agent has worked here: its edits are in this directory.
   // (Checkouts from before the marker existed were wiped this way.)
   if (task.sessionId && existsSync(`${dir}/.git`)) {
-    await runAsWorker("touch", [marker]);
+    await runAsWorker(task.id, "touch", [marker]);
     return;
   }
   if (existsSync(dir)) {
     log.warn(`[${task.id}] rebuilding a checkout that was never finished`);
-    await runAsWorker("rm", ["-rf", dir]);
+    await removeWorkerFiles(task.id, dir);
   }
   // A fetch may have left objects the worker can't read; the clone borrows them.
   await run("chmod", ["-R", "a+rX", `${config.mirrorDir}/.git/objects`]);
-  await runAsWorker("git", ["clone", "--shared", "--no-checkout", config.mirrorDir, dir], { timeoutMs: 10 * 60_000 });
+  await runAsWorker(task.id, "git", ["clone", "--shared", "--no-checkout", config.mirrorDir, dir], { timeoutMs: 10 * 60_000 });
   // A task whose checkout was swept after its PR went up starts again from
   // what it published (the mirror keeps it; the clone borrows its objects).
   const start = task.prEventId ? await publishedTip(task) : undefined;
   if (start) log.info(`[${task.id}] restoring the published branch into a new checkout`);
-  await runAsWorker("git", ["-C", dir, "checkout", "-q", "-b", task.branch, start ?? base]);
+  await runAsWorker(task.id, "git", ["-C", dir, "checkout", "-q", "-b", task.branch, start ?? base]);
   // Artifacts and scratch live in .shipwright/, never in a commit.
-  await runAsWorker("sh", ["-c", `printf '.shipwright/\\n' >> '${dir}/.git/info/exclude'`]);
+  await runAsWorker(task.id, "sh", ["-c", `printf '.shipwright/\\n' >> '${dir}/.git/info/exclude'`]);
   log.info(`[${task.id}] installing dependencies`);
-  await runAsWorker("npm", ["ci", "--no-audit", "--no-fund", "--prefer-offline"], { cwd: dir, timeoutMs: 30 * 60_000 });
-  await runAsWorker("npx", ["playwright", "install", "chromium"], { cwd: dir, timeoutMs: 15 * 60_000 }).catch((err) =>
+  // The shared cache is writable only for the default branch as it stands:
+  // a restored branch is the agent's code, and its install scripts could
+  // plant something there for every later task. It installs from scratch.
+  const prepare = !start;
+  await runAsWorker(task.id, "npm", ["ci", "--no-audit", "--no-fund", "--prefer-offline"], { cwd: dir, timeoutMs: 30 * 60_000, prepare });
+  await runAsWorker(task.id, "npx", ["playwright", "install", "chromium"], { cwd: dir, timeoutMs: 15 * 60_000, prepare }).catch((err) =>
     log.warn(`[${task.id}] playwright install failed (screenshots may not work): ${err.message}`),
   );
-  await runAsWorker("touch", [marker]);
+  await runAsWorker(task.id, "touch", [marker]);
 }
 
 // ── The agent ───────────────────────────────────────────────────────────────
@@ -127,6 +131,7 @@ You are working for Shipwright, the coding agent of the Soapbox community on Arm
 ## Your environment
 - An isolated checkout of Armada at ${checkoutOf(task)}, on branch \`${task.branch}\`, created from the latest \`${config.defaultBranch}\`. Dependencies are installed (\`npm ci\`) and Playwright's Chromium is installed.
 - Linux server, no display. Internet access (npm, docs) but no access to the local network.
+- A sandbox: the only places you can write are this checkout, your home directory and /tmp, and the rest of the system is read-only. Keep scratch work in .shipwright/ or /tmp. Playwright's browsers are already installed in a shared read-only cache, so don't reinstall them; \`npm install\` works and downloads into your home directory.
 - Only the web build can be built and tested here: there is no Android SDK, Xcode or signing setup, so don't try to build an APK or a native app. If the change matters on Android or iOS, test it in the web build at a mobile viewport, and say in the summary what a maintainer should check on the device.
 - You cannot publish anything, and must not try: no \`git push\`, no \`ngit\`, no nsite/Blossom uploads, no posting to Nostr. When you finish, Shipwright reads your commits and your report, builds a preview site, uploads your screenshots and opens the pull request itself.
 - If you start a dev server, use port ${port} (\`npm run dev -- --port ${port} --strictPort\`), and stop it when you are done. Other agents are using other ports at the same time.
@@ -202,7 +207,7 @@ Continue on the same branch. Add commits rather than rewriting history (the pull
 }
 
 /** Spawn the Claude Code CLI as the worker, with only what it needs. */
-function spawnAsWorker(token: string) {
+function spawnAsWorker(task: Task, token: string) {
   return (opts: SpawnOptions) => {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(opts.env)) {
@@ -213,7 +218,7 @@ function spawnAsWorker(token: string) {
     // Inherited by the agent's shell, so Armada's scripts pick them up.
     env.ARMADA_TEST_WORKERS = String(config.testWorkers);
     env.ARMADA_E2E_FULL_CHROMIUM = "1";
-    const { command, args } = workerCommand(opts.command, opts.args, env);
+    const { command, args } = workerCommand(task.id, opts.command, opts.args, env);
     const child = spawn(command, args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
     // With a custom spawner the SDK never sees stderr; keep the tail for the log.
     let tail = "";
@@ -229,7 +234,7 @@ function spawnAsWorker(token: string) {
 export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort: AbortController, onSession: (id: string) => void, given = 0): Promise<WorkerOutcome> {
   const dir = checkoutOf(task);
   // A stale report from the previous round must not pass for this one.
-  await runAsWorker("rm", ["-f", `${dir}/.shipwright/report.json`]);
+  await runAsWorker(task.id, "rm", ["-f", `${dir}/.shipwright/report.json`]);
   const token = proxy.issue(task.id);
   const timer = setTimeout(() => abort.abort(), config.workerTimeoutMin * 60_000);
   let sessionId = task.sessionId;
@@ -259,7 +264,7 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
           // only secret in this environment is the task's own proxy token.
           DISABLE_AUTOUPDATER: "1",
         },
-        spawnClaudeCodeProcess: spawnAsWorker(token),
+        spawnClaudeCodeProcess: spawnAsWorker(task, token),
         stderr: (data: string) => log.debug(`[${task.id}] cli: ${data.trim()}`),
       },
     });
@@ -297,7 +302,7 @@ export async function runAgent(task: Task, proxy: AuthProxy, port: number, abort
 export async function readReport(task: Task): Promise<Report | undefined> {
   try {
     // As the worker: a report.json symlinked at one of our files must not be read as us.
-    const text = await readAsWorker(`${checkoutOf(task)}/.shipwright/report.json`);
+    const text = await readAsWorker(task.id, `${checkoutOf(task)}/.shipwright/report.json`);
     if (text === undefined) return undefined;
     const report = JSON.parse(text) as Report;
     if (!["done", "needs_info", "declined", "answered"].includes(report.status)) return undefined;
@@ -314,8 +319,8 @@ export async function readReport(task: Task): Promise<Report | undefined> {
  */
 export async function inspectCheckout(task: Task, base: string): Promise<{ commits: number; dirty: string }> {
   const dir = checkoutOf(task);
-  const count = await runAsWorker("git", ["-C", dir, "rev-list", "--count", `${base}..HEAD`]);
-  const status = await runAsWorker("git", ["-C", dir, "status", "--porcelain"]);
+  const count = await runAsWorker(task.id, "git", ["-C", dir, "rev-list", "--count", `${base}..HEAD`]);
+  const status = await runAsWorker(task.id, "git", ["-C", dir, "status", "--porcelain"]);
   return { commits: Number(count.stdout.trim()), dirty: status.stdout.trim() };
 }
 
@@ -329,17 +334,17 @@ export const HANDOFF = ".shipwright/handoff";
 export async function bundleCommits(task: Task, base: string): Promise<string> {
   const dir = checkoutOf(task);
   const rel = `${HANDOFF}/branch.bundle`;
-  await runAsWorker("mkdir", ["-p", `${dir}/${HANDOFF}`]);
-  await runAsWorker("git", ["-C", dir, "bundle", "create", rel, `${base}..HEAD`], { timeoutMs: 10 * 60_000 });
+  await runAsWorker(task.id, "mkdir", ["-p", `${dir}/${HANDOFF}`]);
+  await runAsWorker(task.id, "git", ["-C", dir, "bundle", "create", rel, `${base}..HEAD`], { timeoutMs: 10 * 60_000 });
   return rel;
 }
 
 /** The production build, for the preview site: `dist` in the checkout. */
 export async function buildPreview(task: Task): Promise<string> {
-  await runAsWorker("npm", ["run", "build"], { cwd: checkoutOf(task), timeoutMs: 20 * 60_000 });
+  await runAsWorker(task.id, "npm", ["run", "build"], { cwd: checkoutOf(task), timeoutMs: 20 * 60_000 });
   return "dist";
 }
 
 export async function removeCheckout(task: Task): Promise<void> {
-  await runAsWorker("rm", ["-rf", checkoutOf(task)]).catch(() => {});
+  await removeWorkerFiles(task.id, checkoutOf(task)).catch(() => {});
 }

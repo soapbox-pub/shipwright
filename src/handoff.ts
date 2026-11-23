@@ -25,8 +25,8 @@ export function workerPath(rel: string, under: string): string | undefined {
 }
 
 /** A text file from the checkout, read as the worker (at most 64 KiB). */
-export async function readAsWorker(path: string): Promise<string | undefined> {
-  const res = await runAsWorker("cat", ["--", path], { check: false, timeoutMs: 60_000 });
+export async function readAsWorker(task: string, path: string): Promise<string | undefined> {
+  const res = await runAsWorker(task, "cat", ["--", path], { check: false, timeoutMs: 60_000 });
   return res.code === 0 ? res.stdout : undefined;
 }
 
@@ -36,10 +36,10 @@ export async function readAsWorker(path: string): Promise<string | undefined> {
  * as the worker; ours unpacks into a directory only we can read. Anything
  * that comes out as neither a file nor a directory is deleted.
  */
-export async function exportFromWorker(dir: string, paths: string[], maxBytes: number): Promise<string> {
+export async function exportFromWorker(task: string, dir: string, paths: string[], maxBytes: number): Promise<string> {
   const dest = await mkdtemp(join(tmpdir(), "sw-handoff-"));
   try {
-    await pipeTar(dir, paths, dest, maxBytes);
+    await pipeTar(task, dir, paths, dest, maxBytes);
     await scrub(dest);
     return dest;
   } catch (err) {
@@ -48,9 +48,9 @@ export async function exportFromWorker(dir: string, paths: string[], maxBytes: n
   }
 }
 
-function pipeTar(dir: string, paths: string[], dest: string, maxBytes: number): Promise<void> {
+function pipeTar(task: string, dir: string, paths: string[], dest: string, maxBytes: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const { command, args } = workerCommand("tar", ["-C", dir, "--dereference", "--hard-dereference", "-cf", "-", "--", ...paths], {});
+    const { command, args } = workerCommand(task, "tar", ["-C", dir, "--dereference", "--hard-dereference", "-cf", "-", "--", ...paths], {});
     const src = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
     const sink = spawn("tar", ["-C", dest, "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir"], {
       stdio: ["pipe", "ignore", "pipe"],

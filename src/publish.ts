@@ -40,8 +40,9 @@ async function toMp4(task: Task, rel: string, n: number): Promise<string | undef
   const dir = checkoutOf(task);
   const out = `${HANDOFF}/video-${n}.mp4`;
   try {
-    await runAsWorker("mkdir", ["-p", `${dir}/${HANDOFF}`]);
+    await runAsWorker(task.id, "mkdir", ["-p", `${dir}/${HANDOFF}`]);
     await runAsWorker(
+      task.id,
       "ffmpeg",
       ["-y", "-loglevel", "error", "-protocol_whitelist", "file", "-f", "matroska", "-i", `${dir}/${rel}`, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", "-threads", "4", `${dir}/${out}`],
       { timeoutMs: 10 * 60_000 },
@@ -62,7 +63,7 @@ export async function uploadMedia(task: Task, report: Report, signer: Signer): P
     if (rel.endsWith(".webm")) rel = (await toMp4(task, rel, n)) ?? rel;
     let copy: string | undefined;
     try {
-      copy = await exportFromWorker(checkoutOf(task), [rel], MAX_MEDIA);
+      copy = await exportFromWorker(task.id, checkoutOf(task), [rel], MAX_MEDIA);
       const path = await exportedFile(copy, rel);
       if (!path) {
         log.warn(`[${task.id}] artifact is not a regular file: ${item.file}`);
@@ -86,7 +87,7 @@ export async function uploadMedia(task: Task, report: Report, signer: Signer): P
  */
 export async function publishPreview(task: Task, dist: string, signer: Signer): Promise<string> {
   // Copied out as the worker: a symlink in the build reaches only what the worker can read.
-  const copy = await exportFromWorker(checkoutOf(task), [dist], MAX_SITE);
+  const copy = await exportFromWorker(task.id, checkoutOf(task), [dist], MAX_SITE);
   const stage = join(copy, dist);
   try {
     if (!existsSync(join(stage, "index.html"))) throw new Error("the build has no index.html");
@@ -180,7 +181,7 @@ export async function openOrUpdatePr(task: Task, report: Report, base: string): 
   // Never fetch from the checkout itself (git would run in a repository the
   // agent configured); take a bundle the worker wrote, which is only data.
   const bundle = await bundleCommits(task, base);
-  const copy = await exportFromWorker(checkoutOf(task), [bundle], MAX_SITE);
+  const copy = await exportFromWorker(task.id, checkoutOf(task), [bundle], MAX_SITE);
   try {
     const file = await exportedFile(copy, bundle);
     if (!file) throw new Error("the worker's bundle is missing");

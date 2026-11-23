@@ -25,7 +25,8 @@ Armada community (Concord, E2EE)
    ├─ runner                 up to 3 tasks at once, each:
    │    ├─ checkout          git clone --shared of the Armada mirror, npm ci
    │    ├─ worker            Claude Opus 5.5 (Claude Code via the Agent SDK),
-   │    │                    as the unprivileged shipwright-worker user:
+   │    │                    as the unprivileged shipwright-worker user,
+   │    │                    sandboxed to its own checkout (bubblewrap):
    │    │                    implement, npm run test, commit, capture screenshots
    │    ├─ preview           npm run build → named nsite sw-<task> → nsite.run
    │    ├─ media             screenshots/video (webm → mp4) → Blossom
@@ -75,6 +76,21 @@ Anyone in the community can steer an Opus agent with a shell. So:
   `shipwright-worker`, which can't read `/var/lib/shipwright/secrets` (the
   nsec and the Claude token). Its environment is rebuilt from scratch by
   `deploy/as-worker`.
+- **Each task is sandboxed to its own checkout.** Everything run for a task
+  (the agent, and the npm ci, git, tar, ffmpeg and builds the service runs on
+  its behalf) runs in a bubblewrap sandbox made by `deploy/as-worker`. The
+  system is read-only; the task can write only to its checkout
+  (`/srv/shipwright/work/<id>`), its own home (`homes/<id>`, as `$HOME`) and
+  tmp (`tmp/<id>`, as `/tmp`). Other tasks' checkouts and homes aren't
+  mounted, so one task can't change another's work or leave something in a
+  shared home for the next one. A private PID namespace hides other agents'
+  processes, and with them their proxy tokens. Of the service's files only
+  the Armada mirror's `.git` is there, read-only. The shared cache
+  (Playwright's browsers, npm's downloads) is writable only while a fresh
+  checkout of the default branch is being set up, before an agent has touched
+  it. The service checks all this at boot (`src/sandbox.ts`) and won't start
+  if the sandbox doesn't hold. What the sandboxes still share is the network,
+  loopback included, so one agent could reach another's dev server port.
 - **The Claude credential never reaches a worker.** The CLI talks to a
   loopback proxy (`src/authproxy.ts`) with a random per-task token, valid only
   while that task runs; the proxy swaps in the real one.
@@ -125,6 +141,8 @@ Files on the server:
 | `/var/lib/shipwright/state/` | tasks, chat memory, Concord membership, review comments seen |
 | `/var/lib/shipwright/repos/armada` | mirror of Armada; `repos/publish/<id>` are the PR worktrees |
 | `/srv/shipwright/work/<id>` | each task's checkout (owned by the worker) |
+| `/srv/shipwright/homes/<id>`, `tmp/<id>` | each task's `$HOME` (its Claude sessions) and `/tmp`, in its sandbox |
+| `/srv/shipwright/cache` | Playwright's browsers and npm's cache, read-only to agents |
 
 To rotate the Claude token, run `claude setup-token` anywhere and write the
 result to the token file (`install -o shipwright -g shipwright -m 600`); it is

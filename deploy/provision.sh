@@ -49,8 +49,8 @@ chmod 0751 /var/lib/shipwright
 install -d -o shipwright -g shipwright -m 0700 /var/lib/shipwright/secrets /var/lib/shipwright/state
 install -d -o shipwright -g shipwright -m 0755 /var/lib/shipwright/repos
 chmod 0750 /var/lib/shipwright-worker
-# Task checkouts: the worker writes, the service (via the group) reads.
-install -d -o shipwright-worker -g shipwright-work -m 2750 /srv/shipwright /srv/shipwright/work
+# Task checkouts, homes and tmp, each mounted only in its own sandbox.
+bash /root/deploy/sandbox-setup.sh
 
 install -d -o root -g shipwright -m 0750 /etc/shipwright
 touch /etc/shipwright/env
@@ -61,7 +61,8 @@ install -m 0755 /root/deploy/as-worker /opt/shipwright/libexec/as-worker
 
 cat > /etc/sudoers.d/shipwright <<'EOF'
 # The service starts agents and their tooling as the unprivileged worker,
-# always through as-worker, which resets the environment.
+# always through as-worker, which resets the environment and puts every
+# command in its task's sandbox.
 shipwright ALL=(shipwright-worker) NOPASSWD: /opt/shipwright/libexec/as-worker
 EOF
 chmod 0440 /etc/sudoers.d/shipwright
@@ -73,9 +74,7 @@ visudo -cf /etc/sudoers.d/shipwright
 sudo -u shipwright git config --global --unset-all safe.directory || true
 sudo -u shipwright git config --global user.name Shipwright
 sudo -u shipwright git config --global user.email shipwright@nostr.invalid
-sudo -u shipwright-worker git config --global user.name Shipwright
-sudo -u shipwright-worker git config --global user.email shipwright@nostr.invalid
-sudo -u shipwright-worker git config --global --replace-all safe.directory '*'
+# The worker's git config lives in each task's own home (see as-worker).
 
 # ── Chromium's system libraries, for Playwright screenshots and video ──────
 npx -y playwright@1 install-deps chromium

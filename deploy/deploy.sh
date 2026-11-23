@@ -31,6 +31,7 @@ new=/opt/shipwright/app.new
 rm -rf "$new" && cp -a "$src" "$new" && rm -rf "$new/concord-io"
 (cd "$new" && npm ci --omit=dev --no-audit --no-fund -q)
 chmod -R a+rX "$new"
+bash "$new/deploy/sandbox-setup.sh"
 install -m 0755 "$new/deploy/as-worker" /opt/shipwright/libexec/as-worker
 install -m 0644 "$new/deploy/shipwright.service" /etc/systemd/system/shipwright.service
 systemctl daemon-reload

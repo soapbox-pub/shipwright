@@ -1,28 +1,128 @@
 #!/bin/bash
-# Run a command as shipwright-worker with a clean, explicit environment.
+# Run a command as shipwright-worker, in one task's sandbox.
 #
-#   sudo -u shipwright-worker /opt/shipwright/libexec/as-worker [VAR=value ...] -- cmd args...
+#   sudo -u shipwright-worker /opt/shipwright/libexec/as-worker <task> [--prepare] [VAR=value ...] -- cmd args...
+#   sudo -u shipwright-worker /opt/shipwright/libexec/as-worker <task> --remove
 #
-# sudo already drops the caller's environment; this rebuilds the minimum and
-# takes VAR=value pairs for what a task needs (the agent's per-task proxy
-# token, say). Nothing of the service's (its nsec path, its Claude token)
-# can leak through, because nothing is inherited.
+# Every task's commands (the agent, and the npm ci, git, tar, ffmpeg and
+# builds the service runs on its behalf) run in a bubblewrap sandbox that
+# sees the system read-only and can write only to that task's own folders:
+#
+#   /srv/shipwright/work/<task>    the checkout (same path inside)
+#   /srv/shipwright/homes/<task>   mounted as $HOME
+#   /srv/shipwright/tmp/<task>     mounted as /tmp and /var/tmp
+#
+# Other tasks' checkouts, homes and processes are not there at all, and
+# neither is anything of the service's but the Armada mirror's repository
+# (read-only: checkouts are cloned from it and borrow its objects). The shared cache (Playwright's browsers, npm's
+# downloads) is writable only with --prepare, which the service uses to set
+# up a fresh checkout of the default branch before any agent touches it.
+#
+# The environment is rebuilt from scratch: sudo drops the caller's, and only
+# the VAR=value pairs given here (a task's proxy token, say) are added.
+# --remove deletes a task's checkout and scratch but keeps its Claude
+# sessions, so a later revision can still resume them.
 set -euo pipefail
 umask 027
+
+WORK=/srv/shipwright/work
+HOMES=/srv/shipwright/homes
+TMPS=/srv/shipwright/tmp
+CACHE=/srv/shipwright/cache
+MIRROR=/var/lib/shipwright/repos/armada/.git
+APP=/opt/shipwright/app
+HOME_IN=/var/lib/shipwright-worker
+# Before sandboxes, every task shared this home; sessions move out lazily.
+OLD_HOME=/var/lib/shipwright-worker
+
+die() { echo "as-worker: $*" >&2; exit 64; }
+
+task=${1:-}
+[[ "$task" =~ ^([0-9a-f]{6}|selftest)$ ]] || die "expected a task id, got: ${task:-nothing}"
+shift
+work=$WORK/$task home=$HOMES/$task tmp=$TMPS/$task
+
+if [ "${1:-}" = "--remove" ]; then
+  rm -rf --one-file-system -- "$work" "$tmp"
+  if [ -d "$home" ]; then
+    find "$home" -mindepth 1 -maxdepth 1 ! -name .claude -exec rm -rf --one-file-system -- {} +
+  fi
+  exit 0
+fi
+
+prepare=0
+if [ "${1:-}" = "--prepare" ]; then prepare=1; shift; fi
+
 envs=(
-  "HOME=/var/lib/shipwright-worker"
+  "HOME=$HOME_IN"
   "USER=shipwright-worker"
   "PATH=/usr/local/bin:/usr/bin:/bin"
   "LANG=C.UTF-8"
   "CI=1"
+  "TMPDIR=/tmp"
+  "PLAYWRIGHT_BROWSERS_PATH=$CACHE/ms-playwright"
 )
+[ "$prepare" = 1 ] && envs+=("npm_config_cache=$CACHE/npm")
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   case "$1" in
     *=*) envs+=("$1") ;;
-    *) echo "as-worker: expected VAR=value or --, got: $1" >&2; exit 64 ;;
+    *) die "expected VAR=value or --, got: $1" ;;
   esac
   shift
 done
-[ "${1:-}" = "--" ] || { echo "as-worker: missing --" >&2; exit 64; }
+[ "${1:-}" = "--" ] || die "missing --"
 shift
-exec env -i "${envs[@]}" "$@"
+
+# The task's folders. Their parents belong to the worker and are never
+# mounted in a sandbox, so no agent can swap one for a link.
+for d in "$work" "$home" "$tmp"; do
+  [ -L "$d" ] && die "$d is a symlink"
+  mkdir -p "$d"
+done
+mkdir -p "$CACHE/ms-playwright" "$CACHE/npm"
+if [ ! -e "$home/.gitconfig" ]; then
+  # The mirror belongs to the service; git clones from it only if trusted.
+  printf '[user]\n\tname = Shipwright\n\temail = shipwright@nostr.invalid\n[safe]\n\tdirectory = %s\n\tdirectory = %s\n' \
+    "${MIRROR%/.git}" "$MIRROR" > "$home/.gitconfig"
+  old="$OLD_HOME/.claude/projects/-srv-shipwright-work-$task"
+  if [ "$home" != "$OLD_HOME" ] && [ -d "$old" ] && [ ! -L "$old" ]; then
+    mkdir -p "$home/.claude/projects"
+    cp -a -- "$old" "$home/.claude/projects/"
+  fi
+fi
+
+# The commands run where they were asked to, if that is inside the checkout.
+cwd=$work
+case "$PWD/" in "$work/"*) cwd=$PWD ;; esac
+
+# No --disable-userns: it writes /proc/sys, which is read-only in an LXC.
+# A namespace made inside the sandbox can't loosen it anyway: the kernel
+# locks the mounts it inherits, read-only flags included (the self-test in
+# src/sandbox.ts checks).
+args=(
+  --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+  --die-with-parent --new-session --cap-drop ALL
+  --hostname "shipwright-$task"
+  --ro-bind /usr /usr
+  --ro-bind /etc /etc
+  --tmpfs /etc/shipwright
+  --dev /dev
+  --tmpfs /dev/shm
+  --proc /proc
+  --ro-bind-try /sys /sys
+  --ro-bind "$APP" "$APP"
+  --ro-bind "$MIRROR" "$MIRROR"
+  --bind "$work" "$work"
+  --bind "$home" "$HOME_IN"
+  --bind "$tmp" /tmp
+  --bind "$tmp" /var/tmp
+)
+if [ "$prepare" = 1 ]; then args+=(--bind "$CACHE" "$CACHE"); else args+=(--ro-bind "$CACHE" "$CACHE"); fi
+# Ubuntu's merged /usr: /bin, /lib and friends are links into it.
+for d in /bin /sbin /lib /lib32 /lib64 /libx32; do
+  if [ -L "$d" ]; then args+=(--symlink "$(readlink "$d")" "$d")
+  elif [ -d "$d" ]; then args+=(--ro-bind "$d" "$d"); fi
+done
+args+=(--chdir "$cwd")
+
+exec env -i "${envs[@]}" /usr/bin/bwrap "${args[@]}" -- "$@"

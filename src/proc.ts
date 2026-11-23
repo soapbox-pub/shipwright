@@ -68,20 +68,44 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
   });
 }
 
-/**
- * Run a command as shipwright-worker, through as-worker's clean environment.
- * Only the VAR=value pairs given here reach it.
- */
-export function runAsWorker(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
-  const envPairs = Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`);
-  if (config.asWorker.length === 0) return run(cmd, args, opts); // local development
-  const [sudo, ...rest] = config.asWorker;
-  return run(sudo, [...rest, ...envPairs, "--", cmd, ...args], { ...opts, env: {} });
+export interface WorkerOptions extends RunOptions {
+  /**
+   * Set up a fresh checkout of the default branch: the shared cache
+   * (Playwright's browsers, npm's downloads) is writable. Only before an
+   * agent has touched the checkout; otherwise everything it runs could
+   * poison every later task's dependencies.
+   */
+  prepare?: boolean;
 }
 
-export function workerCommand(cmd: string, args: string[], env: Record<string, string>): { command: string; args: string[] } {
-  const envPairs = Object.entries(env).map(([k, v]) => `${k}=${v}`);
-  if (config.asWorker.length === 0) return { command: "env", args: [...envPairs, cmd, ...args] };
+/** What as-worker takes before the command: the task, the mode, the environment. */
+function workerArgs(task: string, env: Record<string, string>, prepare = false): string[] {
+  return [task, ...(prepare ? ["--prepare"] : []), ...Object.entries(env).map(([k, v]) => `${k}=${v}`), "--"];
+}
+
+/**
+ * Run a command as shipwright-worker, in the task's sandbox (deploy/as-worker):
+ * it can write to that task's checkout, home and tmp and nothing else, and
+ * only the VAR=value pairs given here reach it.
+ */
+export function runAsWorker(task: string, cmd: string, args: string[], opts: WorkerOptions = {}): Promise<RunResult> {
+  if (config.asWorker.length === 0) return run(cmd, args, opts); // local development
   const [sudo, ...rest] = config.asWorker;
-  return { command: sudo, args: [...rest, ...envPairs, "--", cmd, ...args] };
+  return run(sudo, [...rest, ...workerArgs(task, opts.env ?? {}, opts.prepare), cmd, ...args], { ...opts, env: {} });
+}
+
+export function workerCommand(task: string, cmd: string, args: string[], env: Record<string, string>): { command: string; args: string[] } {
+  if (config.asWorker.length === 0) return { command: "env", args: [...Object.entries(env).map(([k, v]) => `${k}=${v}`), cmd, ...args] };
+  const [sudo, ...rest] = config.asWorker;
+  return { command: sudo, args: [...rest, ...workerArgs(task, env), cmd, ...args] };
+}
+
+/** Delete a task's checkout and scratch, keeping its Claude sessions (see as-worker). */
+export async function removeWorkerFiles(task: string, dir: string): Promise<void> {
+  if (config.asWorker.length === 0) {
+    await run("rm", ["-rf", dir]);
+    return;
+  }
+  const [sudo, ...rest] = config.asWorker;
+  await run(sudo, [...rest, task, "--remove"], { env: {} });
 }
