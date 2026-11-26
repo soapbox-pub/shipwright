@@ -244,7 +244,7 @@ dependencies = [
 [[package]]
 name = "bridge"
 version = "0.1.0"
-source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=6a5605c0684bded0a001fb985ebdca49014e044b#6a5605c0684bded0a001fb985ebdca49014e044b"
+source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=8ed0644141f8ce985a5c9e0ca59bb46bb540fe06#8ed0644141f8ce985a5c9e0ca59bb46bb540fe06"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -411,7 +411,7 @@ dependencies = [
 [[package]]
 name = "concord"
 version = "0.1.0"
-source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=6a5605c0684bded0a001fb985ebdca49014e044b#6a5605c0684bded0a001fb985ebdca49014e044b"
+source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=8ed0644141f8ce985a5c9e0ca59bb46bb540fe06#8ed0644141f8ce985a5c9e0ca59bb46bb540fe06"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1752,7 +1752,7 @@ checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 [[package]]
 name = "relay-pool"
 version = "0.1.0"
-source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=6a5605c0684bded0a001fb985ebdca49014e044b#6a5605c0684bded0a001fb985ebdca49014e044b"
+source = "git+https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git?rev=8ed0644141f8ce985a5c9e0ca59bb46bb540fe06#8ed0644141f8ce985a5c9e0ca59bb46bb540fe06"
 dependencies = [
  "futures-util",
  "nostr",
