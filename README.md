@@ -64,7 +64,9 @@ are left alone, and none of this is posted in the community.
 **Self-management.** On every boot it re-asserts its kind 0, relay list
 (10002), Blossom list (10063) and bot command manifest (10304), uploads its
 avatar if `assets/avatar.png` changed, follows the community's rekeys and
-refoundings (membership is saved in `state/concord/membership.json`), and
+refoundings (membership is saved in `state/concord/membership.json`), takes
+the writer keys it is owed for read-only channels, such as every channel of a
+community that requires approval to post (`state/concord/writers.json`), and
 introduces itself once per community. Checkouts of tasks finished more than a
 week ago are deleted.
 

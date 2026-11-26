@@ -34,6 +34,7 @@ use bridge::client::{ConcordClient, OpenedChat, SendChat, now_ms, resolve_invite
 use bridge::community::{Attachment, CommunityRuntime};
 use bridge::key_intake::{KeyIntake, intake_access_keys, intake_base_rotations, intake_direct_invite_keys};
 use bridge::relays::{Hub, RelayLike, Relays};
+use bridge::writer_keys::{HeldWriters, intake_writer_keys};
 use concord::community::{ChannelView, Membership};
 use concord::invite::{invite_delivery_relays, parse_invite_link, stock_relays};
 use concord::judge::Verdict;
@@ -49,6 +50,11 @@ const FORWARDED: [u16; 5] = [kinds::MESSAGE, kinds::COMMENT, kinds::REACTION, ki
 
 /// How often the fold is re-read for new channels and the membership saved.
 const RESCAN: Duration = Duration::from_secs(20);
+
+/// How often owed writer keys are looked for while running. Approval can come
+/// any time, and a writer epoch rotates when someone is stopped; nothing is
+/// queried while none is owed.
+const WRITER_RESCAN: Duration = Duration::from_secs(60);
 
 static STDOUT: Mutex<()> = Mutex::new(());
 
@@ -122,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&state)?;
     let primary = read_keys(&key_file)?;
     let membership_path = state.join("membership.json");
+    let writers_path = state.join("writers.json");
     let flags_path = state.join("flags.json");
     let mut flags: Flags = std::fs::read(&flags_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
 
@@ -182,6 +189,11 @@ async fn main() -> anyhow::Result<()> {
     let runtime = CommunityRuntime::open(community.clone(), Arc::new(relays.clone()) as Arc<dyn RelayLike>, None).await?;
     runtime.set_on_excluded(Arc::new(|_| emit(json!({ "type": "excluded" }))));
     let client = runtime.client_for(community.clone(), primary.clone());
+    // Writer keys for restricted Channels (CORD-03 §1): what was taken
+    // before, then whatever is owed now.
+    let held: HeldWriters = std::fs::read(&writers_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    client.adopt_writers(held);
+    take_writer_keys(&client, &primary, &writers_path).await;
 
     if flags.joined_community.as_deref() != Some(community.community_id.as_str()) {
         match client.publish_join(now_ms(), None).await {
@@ -228,6 +240,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut tick = tokio::time::interval(RESCAN);
+    let mut writer_tick = tokio::time::interval(WRITER_RESCAN);
+    writer_tick.tick().await; // just taken
     let mut saved = serde_json::to_string(&*client.community())?;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -242,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(error) => emit(json!({ "type": "result", "id": null, "ok": false, "error": format!("bad command: {error}") })),
                 }
             }
+            _ = writer_tick.tick() => take_writer_keys(&client, &primary, &writers_path).await,
             _ = tick.tick() => {
                 let channels = sync_attachments(&mut attached);
                 let now: HashSet<String> = channels.iter().map(|c| format!("{}:{}", c.id_hex, c.name)).collect();
@@ -260,6 +275,22 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("shutting down");
     Ok(())
+}
+
+/// Take the writer keys owed for restricted Channels, and keep them.
+async fn take_writer_keys(client: &ConcordClient, primary: &Keys, path: &Path) {
+    let Some(folded) = client.folded() else { return };
+    let taken = intake_writer_keys(client.relays().as_ref(), primary, &client.community(), &folded, &client.held_writers()).await;
+    if taken.is_empty() {
+        return;
+    }
+    for (id, w) in &taken {
+        tracing::info!(writer = %id, key = w.secret.is_some(), cert = w.cert.is_some(), "took a writer key");
+    }
+    client.adopt_writers(taken);
+    if let Err(error) = save_json(path, &client.held_writers()) {
+        tracing::warn!(error = %format!("{error:#}"), "saving writer keys failed");
+    }
 }
 
 /// Hand a post to the coordinator if Armada's readers would see it. A post

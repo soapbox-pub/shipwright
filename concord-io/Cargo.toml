@@ -13,8 +13,8 @@ publish = false
 # instead of writing a fourth Concord implementation is the point; bump `rev`
 # when that repository moves.
 [dependencies]
-bridge = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "f84db37e522b9d0bdd592bb748d9cd29da698ac8" }
-concord = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "f84db37e522b9d0bdd592bb748d9cd29da698ac8" }
+bridge = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "6a5605c0684bded0a001fb985ebdca49014e044b" }
+concord = { git = "https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-discord-bridge.git", rev = "6a5605c0684bded0a001fb985ebdca49014e044b" }
 anyhow = "1"
 nostr = { version = "0.45.5", features = ["std", "os-rng", "nip44"] }
 serde = { version = "1", features = ["derive"] }
